@@ -385,6 +385,7 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
     def value_eval_samples(self, X, y=None, average=False, full=True):
         #the new switch is actually equivalent to average=True, but since the training parameters are separated
         #lets keep this ugly solution...
+        n_samples, n_dim = X.shape
         if not average:
             if not full:
                 weights = []
@@ -398,7 +399,8 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
                                                     self.estimators_[idx]['covars'])):
                             diff_data = d - m
                             c_inv = np.linalg.pinv(c) * 0.5
-                            res.append(diff_data.dot(c_inv).dot(diff_data))
+                            c_det = pseudo_determinant(c)
+                            res.append(diff_data.dot(c_inv).dot(diff_data) - n_dim*.5*np.log(np.pi) - .5*np.log(c_det))
                     return np.array(res)
 
                 res = np.array([ -logsumexp(-value_estimator_eval(d), b=np.array(weights)) for d in X])
@@ -409,7 +411,8 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
                                                 self.estimators_full_['covars'])):
                     diff_data = X - m
                     c_inv = np.linalg.pinv(c)
-                    res_mat[:, i] = np.array([e_prod.dot(e)*0.5 for e_prod, e in zip(diff_data.dot(c_inv), diff_data)])
+                    c_det = pseudo_determinant(c)
+                    res_mat[:, i] = np.array([e_prod.dot(e)*0.5 - n_dim*.5*np.log(np.pi) - .5*np.log(c_det) for e_prod, e in zip(diff_data.dot(c_inv), diff_data)])
                 for d_idx, r in enumerate(res_mat):
                     res[d_idx] = -logsumexp(-r, b=self.estimators_full_['weights'])
         else:
@@ -421,7 +424,8 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
                                             self.estimators_[idx]['covars'])):
                     diff_data = X - m
                     c_inv = np.linalg.pinv(c)
-                    res[:, i] = np.array([e_prod.dot(e)*0.5 for e_prod, e in zip(diff_data.dot(c_inv), diff_data)])
+                    c_det = pseudo_determinant(c)
+                    res[:, i] = np.array([e_prod.dot(e)*0.5 - n_dim*.5*np.log(np.pi) - .5*np.log(c_det) for e_prod, e in zip(diff_data.dot(c_inv), diff_data)])
                 for d_idx, r in enumerate(res):
                     logsumexp_res[d_idx] = -logsumexp(-r, b=self.estimators_[idx]['weights'])
 
@@ -502,6 +506,19 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
         return logprob, responsibilities
 
 from scipy import linalg
+
+def pseudo_determinant(S, thres=1e-4, min_covar=1.e-7):
+    n_dim = S.shape[0]
+    try:
+        S_chol = linalg.cholesky(S, lower=True)
+    except linalg.LinAlgError:
+        # The model is most probably stuck in a component with too
+        # few observations, we need to reinitialize this components
+        S_chol = linalg.cholesky(S + min_covar * np.eye(n_dim),
+                                  lower=True)
+    S_chol_diag = np.diag(S_chol)
+
+    return np.prod(S_chol_diag[S_chol_diag > thres]) ** 2
 
 def _log_multivariate_normal_density_full(X, means, covars, min_covar=1.e-7):
     """

@@ -428,7 +428,7 @@ def PendulumMDPValueLearning(traj_lst, sys, n_est=50, rs=0, mdp=None):
                 data.append(np.concatenate([traj[idx]+noise_array[idx], traj[idx+1]+noise_array[idx+1]]))     #demonstrated x_n, x_{n+1}
     data=np.array(data)
     #train with EnsembleIOC
-    mdl=eioc.EnsembleIOC(n_estimators=n_est, max_depth=3, em_itrs=10, min_samples_split=10, min_samples_leaf=5, regularization=1e-5, 
+    mdl=eioc.EnsembleIOC(n_estimators=n_est, max_depth=3, em_itrs=5, min_samples_split=10, min_samples_leaf=5, regularization=1e-5, 
         passive_dyn_func=sys.PassiveDynamics, passive_dyn_ctrl=np.array([[0, 0], [0, 1]]), passive_dyn_noise=1e-3, verbose=True)
     mdl.fit(X=data)
 
