@@ -411,24 +411,37 @@ from sklearn.ensemble import RandomTreesEmbedding
 from collections import defaultdict
 from scipy.misc import logsumexp
 
-def PendulumMDPValueLearning(traj_lst, sys, n_est=50, rs=0, mdp=None):
-    data = []
-    ax=None
+def PendulumMDPValueLearningBuildData(traj_lst, rand_size=40, tail_cut=100, noise_level=0.02):
     xmin = np.array([0, -10])
     xmax = np.array([2*np.pi, 10])
-    for traj in traj_lst[0:]:
-        ax = pendulum_traj_draw(traj, ax)
-        noise_array = np.random.normal(scale=0.02,size=(len(traj), 2))
-        for idx in range(0, len(traj)-100):
+    train_data = []
+    test_data = []
+    for traj in traj_lst[0:150]:
+        # ax = pendulum_traj_draw(traj, ax)
+        noise_array = np.random.normal(scale=noise_level,size=(len(traj), 2))
+        for idx in np.random.choice(range(0, len(traj)-tail_cut),size=rand_size):
             #check if the data is within the interested range
             if traj[idx][0] < xmin[0] or traj[idx][0] > xmax[0] or traj[idx][1] < xmin[1] or traj[idx][1] > xmax[1] \
                 or traj[idx+1][0] < xmin[0] or traj[idx+1][0] > xmax[0] or traj[idx+1][1] < xmin[1] or traj[idx+1][1] > xmax[1]:
                 continue
             else:
-                data.append(np.concatenate([traj[idx]+noise_array[idx], traj[idx+1]+noise_array[idx+1]]))     #demonstrated x_n, x_{n+1}
-    data=np.array(data)
+                train_data.append(np.concatenate([traj[idx]+noise_array[idx], traj[idx+1]+noise_array[idx+1]]))     #demonstrated x_n, x_{n+1}
+    train_data=np.array(train_data)
+    for traj in traj_lst[150:]:
+        for idx in np.random.choice(range(0, len(traj)-tail_cut),size=rand_size):
+            #check if the data is within the interested range
+            if traj[idx][0] < xmin[0] or traj[idx][0] > xmax[0] or traj[idx][1] < xmin[1] or traj[idx][1] > xmax[1] \
+                or traj[idx+1][0] < xmin[0] or traj[idx+1][0] > xmax[0] or traj[idx+1][1] < xmin[1] or traj[idx+1][1] > xmax[1]:
+                continue
+            else:
+                test_data.append(np.concatenate([traj[idx]+noise_array[idx], traj[idx+1]+noise_array[idx+1]]))     #demonstrated x_n, x_{n+1}
+    test_data = np.array(test_data)
+    return train_data, test_data
+
+def PendulumMDPValueLearning(data, sys, n_est=50, rs=0, em_itrs=0, mdp=None):
+
     #train with EnsembleIOC
-    mdl=eioc.EnsembleIOC(n_estimators=n_est, max_depth=3, em_itrs=5, min_samples_split=10, min_samples_leaf=5, regularization=1e-5, 
+    mdl=eioc.EnsembleIOC(n_estimators=n_est, max_depth=3, random_state=rs, em_itrs=em_itrs, min_samples_split=10, min_samples_leaf=5, regularization=1e-5, 
         passive_dyn_func=sys.PassiveDynamics, passive_dyn_ctrl=np.array([[0, 0], [0, 1]]), passive_dyn_noise=1e-3, verbose=True)
     mdl.fit(X=data)
 
@@ -442,7 +455,8 @@ def PendulumMDPValueLearning(traj_lst, sys, n_est=50, rs=0, mdp=None):
 def PendulumMDPValueLearningTest(opt_res):
     pendulum = PendulumDynSys(dt=0.01)
     traj_lst = opt_res['traj_opt']
-    value_func, rf_mdl = PendulumMDPValueLearning(traj_lst, sys=pendulum)
+    data, _ = PendulumMDPValueLearningBuildData(traj_lst)
+    value_func, rf_mdl = PendulumMDPValueLearning(data, sys=pendulum, n_est=100, em_itrs=0)
 
     #test to show values...
     x = np.linspace(0, 2*np.pi, 51)
@@ -478,46 +492,92 @@ def PendulumMDPValueLearningTest(opt_res):
     return
 
 def PendulumMDPValueLearningError(opt_res):
-
-    M = [3, 5, 8, 15, 20, 30, 50, 100, 150, 200]
+    M = [1, 3, 5, 15, 30, 50, 75, 100]
+    
+    m_itrs = [0, 1, 3, 5, 10]
     pendulum = PendulumDynSys(dt=0.01)
     traj_lst = opt_res['traj_opt']
-    J_opt = opt_res['value_opt']
+    train_data, test_data = PendulumMDPValueLearningBuildData(traj_lst)  
+    test_data_old = test_data[:, 0:test_data.shape[1]/2]
+    test_data_new = test_data[:, test_data.shape[1]/2:]
+    test_data_new_passive = None 
+    # J_opt = opt_res['value_opt']
 
-    J_opt_normed = (J_opt - np.mean(J_opt)) 
+    # J_opt_normed = (J_opt - np.mean(J_opt)) 
+    run_num_itrs = 10
+    err_lst_full = []
+    for m_itr in m_itrs:
+        tmp_err_lst = []
+        print 'Training with Maximum Number of Iterations:', m_itr
+        for m in M:
+            err = []
+            for i in range(run_num_itrs):
+                itr_err = []
+                value_func, rf_mdl = PendulumMDPValueLearning(train_data, sys=pendulum, n_est=m, rs=(i+1)*m*(m_itr+1), em_itrs=m_itr)
 
-    err_lst = []
-    run_num_itrs = 5
-    for m in M:
-        err = []
-        for i in range(run_num_itrs):
-            value_func, rf_mdl = PendulumMDPValueLearning(traj_lst, sys=pendulum, n_est=m, rs=i)
+                #test to show values...
+                # x = np.linspace(0, 2*np.pi, 51)
+                # x_dot = np.linspace(-10, 10, 51)
+                # Sgrid = np.meshgrid(x, x_dot)
+                # states = np.array([np.reshape(dim, (1, -1))[0] for dim in Sgrid])
+                # J = np.zeros(states.shape[1])
+                # for state_idx in range(states.shape[1]):
+                #     J[state_idx] = value_func(states[:, state_idx], rf_mdl)
+                # #norm this J
+                # J_normed = (J - np.mean(J))
+                # err.append(np.linalg.norm(J_normed - J_opt_normed, ord=1)/len(J_opt))
+                # test the likelihood of test trajectories
+                #construct passive state
+                if test_data_new_passive is None:
+                    test_data_new_passive = np.array([rf_mdl.passive_dyn_func(test_data_old[sample_idx]) for sample_idx in range(test_data_old.shape[0])])
+                for e_idx in range(rf_mdl.n_estimators):
+                    itr_err.append((rf_mdl._do_estep(e_idx, test_data_new_passive, test_data_new, None)[0]).mean())
+                err.append(np.mean(itr_err))
+            tmp_err_lst.append(err)
 
-            #test to show values...
-            x = np.linspace(0, 2*np.pi, 51)
-            x_dot = np.linspace(-10, 10, 51)
-            Sgrid = np.meshgrid(x, x_dot)
-            states = np.array([np.reshape(dim, (1, -1))[0] for dim in Sgrid])
-            J = np.zeros(states.shape[1])
-            for state_idx in range(states.shape[1]):
-                J[state_idx] = value_func(states[:, state_idx], rf_mdl)
-            #norm this J
-            J_normed = (J - np.mean(J))
-            err.append(np.linalg.norm(J_normed - J_opt_normed, ord=1)/len(J_opt))
-        err_lst.append(err)
+        #plot
+        tmp_err_lst = np.array(tmp_err_lst)
+        err_lst_full.append(tmp_err_lst)
 
-    #plot
-    err_lst = np.array(err_lst)
     plt.ion()
     fig = plt.figure()
     ax = fig.add_subplot(111)
-    ax.errorbar(M, np.mean(err_lst, axis=1), yerr=np.std(err_lst, axis=1), fmt='-o', linewidth=4.0, markersize=20.0)
-    ax.set_xlabel('Model size - M', fontsize=20)
-    ax.set_ylabel('Cost err', fontsize=20)
-    ax.set_title('Cost Error versus Model Size', fontsize=20)
+    ax.hold(True)
 
+    for err_lst in err_lst_full:
+        ax.errorbar(M, np.mean(err_lst, axis=1), yerr=np.std(err_lst, axis=1), fmt='-o', linewidth=4.0, markersize=20.0)
+
+    ax.set_xlabel('Model size - M', fontsize=20)
+    ax.set_ylabel('Log-likelihood', fontsize=20)
+    ax.set_title('Log-likelihood of Test Data versus Model Size', fontsize=20)
     plt.draw()
-    return
+    return err_lst_full
+
+def PendulumMDPValueLearningErrorDraw(err_lst_full, M, m_itrs):
+    '''
+    plot Log-likelihood for test data performance
+    '''
+    fig = plt.figure()
+    ax = fig.add_subplot(111)
+    ax.hold(True)
+    colors = [(1.0, 0.0, 0.0), (0.5, 0.5, 0.0), (0.0, 1.0, 0.0), (0.0, 0.5, 0.5), (0.0, 0.0, 1.0)]
+    lines = []
+    legend_txt = []
+    for m_idx, m_itr in enumerate(m_itrs):
+        line, _ = utils.draw_err_bar_with_filled_shape(ax, M, 
+            np.mean(err_lst_full[m_idx], axis=1), np.std(err_lst_full[m_idx], axis=1), colors[m_idx%len(colors)])
+        lines.append(line)
+        legend_txt.append('Max Iterations: {0}'.format(m_itr))
+    #prepare legend, axis text...
+    plt.legend(lines, legend_txt, loc='best')
+    ax.yaxis.grid()
+    ax.xaxis.grid()
+    ax.set_xlabel('Model size - M', fontsize=20)
+    ax.set_ylabel('Log-likelihood', fontsize=20)
+    ax.set_title('Log-likelihood of Test Data versus Model Size', fontsize=20)
+    plt.draw()
+    return ax
+
 
 import timeit
 

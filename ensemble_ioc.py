@@ -160,6 +160,8 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
             # em_res = self._em_steps(None, X, y)
             #then use them
             self.estimators_=em_res
+
+        self.prepare_inv_and_constants()
         return
 
     def _em_steps(self, estimator_idx, X, y=None):
@@ -303,6 +305,9 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
         #another idea is to symplify the model by only learning the mean, or say the center of the RBF function
         #the width of the RBF basis can be adapted by solving a one-dimensional numerical optimization, this should lead to 
         #a generalized EM algorithm
+        #<hyin/Jan-22nd-2016> note that without the adaptation of covariance, the shift of mean
+        #is not that great option, so let's only keeps the weights adapatation. We need numerical optimization for the covariance adaptation
+        #to see if it would help the mean shift 
         if 'means' in parms:
             for c, old_mean in enumerate(parms['means']):
                 Sigma_k_array = parms['covars'][c]
@@ -326,7 +331,7 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
                 inv_Sigma_sum = inv_Sigma_k_array + inv_Sigma_0
                 delta_X_new_X_new_passive = (inv_Sigma_sum.dot(X_new.T) - inv_Sigma_0.dot(X_new_passive.T)).T
                 parms['means'][c] = coeff_mat.dot(np.sum(delta_X_new_X_new_passive*responsibilities[:, c][:, np.newaxis]*inverse_weights[c, 0], axis=0))
-        return
+        # return
 
     def sample(self, n_samples=1, random_state=None):
         '''
@@ -382,7 +387,13 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
         return res, res_responsibilities 
 
 
-    def value_eval_samples(self, X, y=None, average=False, full=True):
+    def value_eval_samples(self, X, y=None, average=False, full=True, const=True):
+        #switching off the constant term seems to smooth the value function
+        #I don't quite understand why, my current guess is that the axis-align partition results in 
+        #oversized covariance matrices, making the constant terms extremely large for some partitions
+        #this can be shown adding a fixed term to the covariance matrices to mitigate the singularity
+        #this could be cast as a kind of regularization
+
         #the new switch is actually equivalent to average=True, but since the training parameters are separated
         #lets keep this ugly solution...
         n_samples, n_dim = X.shape
@@ -395,24 +406,20 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
                 def value_estimator_eval(d):
                     res = []
                     for idx in range(self.n_estimators):
-                        for i, (m, c) in enumerate(   zip(self.estimators_[idx]['means'], 
-                                                    self.estimators_[idx]['covars'])):
+                        for i, (m, c_inv) in enumerate(   zip(self.estimators_[idx]['means'], 
+                                                    self.estimators_[idx]['inv_covars'])):
                             diff_data = d - m
-                            c_inv = np.linalg.pinv(c) * 0.5
-                            c_det = pseudo_determinant(c)
-                            res.append(diff_data.dot(c_inv).dot(diff_data) - n_dim*.5*np.log(np.pi) - .5*np.log(c_det))
+                            res.append(.5*diff_data.dot(c_inv).dot(diff_data) + self.estimators_[idx]['beta'][i]*const)
                     return np.array(res)
 
                 res = np.array([ -logsumexp(-value_estimator_eval(d), b=np.array(weights)) for d in X])
             else:
                 res = np.zeros(X.shape[0])
                 res_mat = np.zeros((X.shape[0], len(self.estimators_full_['means'])))
-                for i, (m, c)   in enumerate(   zip(self.estimators_full_['means'], 
-                                                self.estimators_full_['covars'])):
+                for i, (m, c_inv)   in enumerate(   zip(self.estimators_full_['means'], 
+                                                self.estimators_full_['inv_covars'])):
                     diff_data = X - m
-                    c_inv = np.linalg.pinv(c)
-                    c_det = pseudo_determinant(c)
-                    res_mat[:, i] = np.array([e_prod.dot(e)*0.5 - n_dim*.5*np.log(np.pi) - .5*np.log(c_det) for e_prod, e in zip(diff_data.dot(c_inv), diff_data)])
+                    res_mat[:, i] = np.array([e_prod.dot(e)*0.5 + self.estimators_full_['beta'][i]*const for e_prod, e in zip(diff_data.dot(c_inv), diff_data)])
                 for d_idx, r in enumerate(res_mat):
                     res[d_idx] = -logsumexp(-r, b=self.estimators_full_['weights'])
         else:
@@ -420,12 +427,10 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
             def value_estimator_eval(idx):
                 res = np.zeros((X.shape[0], len(self.estimators_[idx]['means'])))
                 logsumexp_res=np.zeros(len(res))
-                for i, (m, c) in enumerate(   zip(self.estimators_[idx]['means'], 
-                                            self.estimators_[idx]['covars'])):
+                for i, (m, c_inv) in enumerate(   zip(self.estimators_[idx]['means'], 
+                                            self.estimators_[idx]['inv_covars'])):
                     diff_data = X - m
-                    c_inv = np.linalg.pinv(c)
-                    c_det = pseudo_determinant(c)
-                    res[:, i] = np.array([e_prod.dot(e)*0.5 - n_dim*.5*np.log(np.pi) - .5*np.log(c_det) for e_prod, e in zip(diff_data.dot(c_inv), diff_data)])
+                    res[:, i] = np.array([e_prod.dot(e)*0.5 + self.estimators_[idx]['beta'][i]*const for e_prod, e in zip(diff_data.dot(c_inv), diff_data)])
                 for d_idx, r in enumerate(res):
                     logsumexp_res[d_idx] = -logsumexp(-r, b=self.estimators_[idx]['weights'])
 
@@ -505,9 +510,29 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
         responsibilities = np.exp(lpr - logprob[:, np.newaxis])
         return logprob, responsibilities
 
+    def prepare_inv_and_constants(self):
+        '''
+        supplement steps to prepare inverse of variance matrices and constant terms
+        ''' 
+        for idx in range(self.n_estimators):
+            self.estimators_[idx]['inv_covars'] = [ np.linalg.pinv(covar) for covar in self.estimators_[idx]['covars']]
+            self.estimators_[idx]['beta'] = [.5*np.log(pseudo_determinant(covar)) + .5*np.log(2*np.pi)*covar.shape[0] for covar in self.estimators_[idx]['covars']]
+
+        self.estimators_full_['weights'] = []
+        self.estimators_full_['means'] = []
+        self.estimators_full_['covars'] = []
+        for e_idx in range(self.n_estimators):
+            for leaf_idx in range(len(self.estimators_[e_idx]['weights'])):
+                self.estimators_full_['weights'].append(self.estimators_[e_idx]['weights'][leaf_idx]/float(self.n_estimators))
+                self.estimators_full_['covars'].append(self.estimators_[e_idx]['covars'][leaf_idx])
+                self.estimators_full_['means'].append(self.estimators_[e_idx]['means'][leaf_idx])
+        self.estimators_full_['inv_covars'] = [ np.linalg.pinv(covar) for covar in self.estimators_full_['covars']]
+        self.estimators_full_['beta'] = [.5*np.log(pseudo_determinant(covar)) + .5*np.log(2*np.pi)*covar.shape[0] for covar in self.estimators_full_['covars']]
+        return
+
 from scipy import linalg
 
-def pseudo_determinant(S, thres=1e-4, min_covar=1.e-7):
+def pseudo_determinant(S, thres=5, min_covar=1.e-7):
     n_dim = S.shape[0]
     try:
         S_chol = linalg.cholesky(S, lower=True)
@@ -518,7 +543,7 @@ def pseudo_determinant(S, thres=1e-4, min_covar=1.e-7):
                                   lower=True)
     S_chol_diag = np.diag(S_chol)
 
-    return np.prod(S_chol_diag[S_chol_diag > thres]) ** 2
+    return np.prod(S_chol_diag) ** 2 + thres
 
 def _log_multivariate_normal_density_full(X, means, covars, min_covar=1.e-7):
     """

@@ -144,3 +144,24 @@ def add_arrow_to_line2D(
         axes.add_patch(p)
         arrows.append(p)
     return arrows
+
+def draw_err_bar_with_filled_shape(ax, x_data, y_data, err=None, color=(0, 0, 1), transp=0.2):
+    '''
+    wrapped function to draw curve with filled shape to indicate error bar
+    '''
+    line = None
+    shade = None
+    #validate the length of err
+    if err is not None:
+        if len(x_data) != len(y_data) or len(x_data) != len(err):
+            print 'The length of data and err must be consistent.'
+            return line, shade
+        line, = ax.plot(x_data, y_data, color=color)
+        ax.hold(True)
+        #<hyin/Jan-22nd-2016> linewidth=0 does not work on matplotlib 1.4.2, it is fixed on 1.4.3 though...
+        shade = plt.fill_between(x_data, y_data-err, y_data+err, alpha=transp, edgecolor=color, facecolor=color, linewidth=3.0)
+        return line, shade
+    else:
+        #just draw curve...
+        line, = ax.plot(x_data, y_data, color=color)
+        return line, shade
