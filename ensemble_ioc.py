@@ -119,6 +119,8 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
             #for each estimator
             estimator_parms = defaultdict(list)
             for l_idx in leaf_idx[e_idx]:
+                if self.verbose:
+                    print 'Processing {0}-th estimator and {1}-th leaf...'.format(e_idx, l_idx)
                 #and for each data partition
                 data_partition=np.array(partitioned_data[e_idx, l_idx])
 
