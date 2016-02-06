@@ -20,7 +20,7 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
                         max_depth=5, min_samples_split=10, min_samples_leaf=10,
                         random_state=0,
                         em_itrs=5,
-                        regularization=1e-5,
+                        regularization=0.05,
                         passive_dyn_func=None,
                         passive_dyn_ctrl=None,
                         passive_dyn_noise=None,
@@ -95,6 +95,7 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
             indices = self.random_embedding_mdl_.apply(X)
 
         partitioned_data = defaultdict(list)
+
         leaf_idx = defaultdict(set)
         weight_idx = defaultdict(float)
         #group data belongs to the same partition and have the weights...
@@ -115,6 +116,8 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
         self.estimators_ = []
         #another copy to store the parameters all together, for EM/evaluation on all of the models
         self.estimators_full_ = defaultdict(list)
+        #<hyin/Feb-6th-2016> an estimator and leaf indexed structure to record the passive likelihood of data...
+        passive_likelihood_dict = defaultdict(list)
         for e_idx in range(self.n_estimators):
             #for each estimator
             estimator_parms = defaultdict(list)
@@ -123,7 +126,6 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
                     print 'Processing {0}-th estimator and {1}-th leaf...'.format(e_idx, l_idx)
                 #and for each data partition
                 data_partition=np.array(partitioned_data[e_idx, l_idx])
-
                 if self.passive_dyn_func is not None and self.passive_dyn_ctrl is not None and self.passive_dyn_noise is not None:
                     X_new         = data_partition[:, data_partition.shape[1]/2:]
                     X_old         = data_partition[:, 0:data_partition.shape[1]/2]
@@ -139,6 +141,11 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
                     #for full estimators
                     self.estimators_full_['means'].append(estimator_parms['means'][-1])
                     self.estimators_full_['covars'].append(estimator_parms['covars'][-1])
+
+                    #<hyin/Feb-6th-2016> also remember the data weight according to the passive likelihood
+                    #this could be useful if the weights according to the passive likelihood is desired for other applications
+                    #to evaluate some statistics within the data parition
+                    passive_likelihood_dict[e_idx, l_idx] = weights
                 else:
                     estimator_parms['means'].append(np.mean(data_partition, axis=0))
                     estimator_parms['covars'].append(np.cov(data_partition.T))
@@ -146,6 +153,9 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
                     #for full estimators
                     self.estimators_full_['means'].append(estimator_parms['means'][-1])
                     self.estimators_full_['covars'].append(estimator_parms['covars'][-1])
+
+                    #for MaxEnt, uniform passive likelihood
+                    passive_likelihood_dict[e_idx, l_idx] = np.ones(len(data_partition)) / float(len(data_partition))
 
 
                 estimator_parms['weights'].append(weight_idx[e_idx, l_idx])
@@ -164,7 +174,7 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
             self.estimators_=em_res
 
         self.prepare_inv_and_constants()
-        return
+        return indices, leaf_idx, passive_likelihood_dict
 
     def _em_steps(self, estimator_idx, X, y=None):
         #use current estimation as initialization to perform expectation-maximization
@@ -399,6 +409,7 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
         #the new switch is actually equivalent to average=True, but since the training parameters are separated
         #lets keep this ugly solution...
         n_samples, n_dim = X.shape
+
         if not average:
             if not full:
                 weights = []
@@ -516,9 +527,10 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
         '''
         supplement steps to prepare inverse of variance matrices and constant terms
         ''' 
+        regularization = self.reg
         for idx in range(self.n_estimators):
-            self.estimators_[idx]['inv_covars'] = [ np.linalg.pinv(covar) for covar in self.estimators_[idx]['covars']]
-            self.estimators_[idx]['beta'] = [.5*np.log(pseudo_determinant(covar)) + .5*np.log(2*np.pi)*covar.shape[0] for covar in self.estimators_[idx]['covars']]
+            self.estimators_[idx]['inv_covars'] = [ np.linalg.pinv(covar + np.eye(covar.shape[0])*regularization) for covar in self.estimators_[idx]['covars']]
+            self.estimators_[idx]['beta'] = [.5*np.log(pseudo_determinant(covar + np.eye(covar.shape[0])*regularization)) + .5*np.log(2*np.pi)*covar.shape[0] for covar in self.estimators_[idx]['covars']]
 
         self.estimators_full_['weights'] = []
         self.estimators_full_['means'] = []
@@ -528,13 +540,15 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
                 self.estimators_full_['weights'].append(self.estimators_[e_idx]['weights'][leaf_idx]/float(self.n_estimators))
                 self.estimators_full_['covars'].append(self.estimators_[e_idx]['covars'][leaf_idx])
                 self.estimators_full_['means'].append(self.estimators_[e_idx]['means'][leaf_idx])
-        self.estimators_full_['inv_covars'] = [ np.linalg.pinv(covar) for covar in self.estimators_full_['covars']]
-        self.estimators_full_['beta'] = [.5*np.log(pseudo_determinant(covar)) + .5*np.log(2*np.pi)*covar.shape[0] for covar in self.estimators_full_['covars']]
+        # self.estimators_full_['inv_covars'] = [ np.linalg.pinv(covar) for covar in self.estimators_full_['covars']]
+        # self.estimators_full_['beta'] = [.5*np.log(pseudo_determinant(covar)) + .5*np.log(2*np.pi)*covar.shape[0] for covar in self.estimators_full_['covars']]
+                self.estimators_full_['inv_covars'].append(self.estimators_[e_idx]['inv_covars'][leaf_idx])
+                self.estimators_full_['beta'].append(self.estimators_[e_idx]['beta'][leaf_idx])
         return
 
 from scipy import linalg
 
-def pseudo_determinant(S, thres=5, min_covar=1.e-7):
+def pseudo_determinant(S, thres=1e-3, min_covar=1.e-7):
     n_dim = S.shape[0]
     try:
         S_chol = linalg.cholesky(S, lower=True)
@@ -545,7 +559,7 @@ def pseudo_determinant(S, thres=5, min_covar=1.e-7):
                                   lower=True)
     S_chol_diag = np.diag(S_chol)
 
-    return np.prod(S_chol_diag) ** 2 + thres
+    return np.prod(S_chol_diag[S_chol_diag>thres]) ** 2
 
 def _log_multivariate_normal_density_full(X, means, covars, min_covar=1.e-7):
     """
@@ -591,6 +605,8 @@ def _frequency_weighted_covariance(X, m, weights, spherical=False):
     else:
         diff_data = X - m
         covar = (coeff*diff_data.T).dot(diff_data)
+        #need numpy 1.10
+        # covar = np.cov(X, aweights=weights)
 
     return covar
 
