@@ -9,7 +9,7 @@ import ensemble_ioc as eioc
 
 class EnCost_TrajLearner():
     def __init__(self,  n_estimators=20, 
-                    max_depth=3, min_samples_split=4, min_samples_leaf=2,
+                    max_depth=3, min_samples_split=5, min_samples_leaf=5,
                     random_state=0,
                     em_itrs=0,
                     regularization=0.01,
@@ -80,11 +80,11 @@ class EnCost_TrajLearner():
         if self.verbose:
             print 'fitting...'
         #<hyin/Feb-6th-2016> remember now the flattened trajectories are now suffixed with the phase scale
-        indices, leaf_idx_dict, passive_likelihood_dict = self.eioc_mdl.fit(train_data[:, 0:-1])
+        indices, leaf_idx_dict, partitioned_data, passive_likelihood_dict = self.eioc_mdl.fit(train_data[:, 0:-1])
         #extract desired information...
         if self.verbose:
             print 'populating learner parameters...'
-        self.populate_learner_parms_(train_data, indices, leaf_idx_dict, passive_likelihood_dict)
+        self.populate_learner_parms_(train_data, indices, leaf_idx_dict, partitioned_data, passive_likelihood_dict)
 
         return
 
@@ -124,7 +124,7 @@ class EnCost_TrajLearner():
 
         return
 
-    def populate_learner_parms_(self, train_data, indices, leaf_idx_dict, passive_likelihood_dict):
+    def populate_learner_parms_(self, train_data, indices, leaf_idx_dict, partitioned_data, passive_likelihood_dict):
         """
         this is the function to construct trajectory favored format from the eioc results...
         """
@@ -156,6 +156,13 @@ class EnCost_TrajLearner():
             for l_idx in leaf_idx_dict[e_idx]:
                 self.mode_phase_scales.append(self.n_phases*np.sum(np.array(passive_likelihood_dict[e_idx, l_idx]) * np.array(phase_scale_dict[e_idx, l_idx])))
                 self.mode_phase_scales_var.append(self.n_phases**2 * np.array(np.sum(np.array(passive_likelihood_dict[e_idx, l_idx]) * phase_scale_dict[e_idx, l_idx]) - self.mode_phase_scales[-1])**2)
+                #figure out tracking_mat along the phase horizon
+                #<hyin/Feb-8th-2016> it turns out that covariance matrix for all dimensions is not smooth
+                #now only evaluate the with respect to each dimension so the resultant gain is dimension independent
+                # print '{0} trajectories for partition {1} - {2}'.format(len(partitioned_data[e_idx, l_idx]), e_idx, l_idx)
+                trajs_reshape = [np.reshape(d, (self.n_dofs, -1)) for d in partitioned_data[e_idx, l_idx]]
+                tmp_tracking_mats = [np.linalg.pinv(np.diag([np.cov(d_dof) for d_dof in np.array([d[:, p_idx] for d in trajs_reshape]).T]) + np.eye(self.n_dofs)*0.01) for p_idx in range(self.n_phases)]
+                self.tracking_mats.append(tmp_tracking_mats)    
 
         for mode_idx, (mean_traj, traj_covar, traj_cost_const, weights) in enumerate(zip(    self.eioc_mdl.estimators_full_['means'],
                                                                                                 self.eioc_mdl.estimators_full_['covars'],
@@ -170,8 +177,10 @@ class EnCost_TrajLearner():
             # else:
             self.mean_trajs.append(np.reshape(mean_traj, (self.n_dofs, self.n_phases)).T)
             #extract correlated terms to construct the variance for each phase step
-            tmp_covar_mats = [traj_covar[np.array([i+np.arange(self.n_dofs)*self.n_phases]).T.tolist(), i+np.arange(self.n_dofs)*self.n_phases] for i in range(self.n_phases)]
-            self.tracking_mats.append([np.linalg.pinv(mat + np.eye(mat.shape[0])*0.01) for mat in tmp_covar_mats])
+            # tmp_covar_mats = [traj_covar[np.array([i+np.arange(self.n_dofs)*self.n_phases]).T.tolist(), i+np.arange(self.n_dofs)*self.n_phases] for i in range(self.n_phases)]
+            #is there anything wrong with the extraction above? let's try another naive way...
+
+            # self.tracking_mats.append([np.linalg.pinv(mat + np.eye(mat.shape[0])*0.01) for mat in tmp_covar_mats])
             #for the constant term
             self.cost_consts.append([-0.5*np.log(eioc.pseudo_determinant(mat)) + 0.5*np.log(np.pi*2)*self.n_dofs for mat in self.tracking_mats[-1]])
             # print weights
@@ -338,8 +347,8 @@ class EnCost_ImpController:
         # ref_pnt = self.ref_trajs[mode][idx, :]
         # weight_mat = self.track_weights[mode][idx]
 
-        # cost = (obs - ref_pnt).dot(weight_mat.dot(obs-ref_pnt))
-        cost = (obs[3:] - ref_pnt[3:]).dot((obs[3:] - ref_pnt[3:])) * 5.0
+        cost = (obs - ref_pnt).dot(weight_mat.dot(obs-ref_pnt))
+        # cost = (obs[3:] - ref_pnt[3:]).dot((obs[3:] - ref_pnt[3:])) * 5.0
         # cost = (obs - ref_pnt).dot(obs - ref_pnt) * 5.0
         return cost
     def evaluate_cost_to_go_ti_(self, mode, obs):
@@ -555,11 +564,11 @@ def EnCost_TrajAdaCtrl_Test(learner=None):
     ax_vel.set_aspect('equal')
     # ax_pos.plot(xs=cir_path[:, 0], ys=cir_path[:, 1], zs=cir_path[:, 2], color='k', alpha=0.8)
     # ax_pos.plot(xs=aug_traj_data[5][:, 0], ys=aug_traj_data[5][:, 1], zs=aug_traj_data[5][:, 2], color='b')
-    for traj, scale in zip(interp_data, phase_scale):
-        ax_pos.plot(xs=traj[:, 0], ys=traj[:, 1], zs=traj[:, 2], linestyle='--', color='b', alpha=0.6)
-        ax_vel.plot(xs=traj[:, 3], ys=traj[:, 4], zs=traj[:, 5], linestyle='-', color='b', alpha=0.6)
+    # for traj, scale in zip(interp_data, phase_scale):
+    #     ax_pos.plot(xs=traj[:, 0], ys=traj[:, 1], zs=traj[:, 2], linestyle='--', color='b', alpha=0.6)
+    #     ax_vel.plot(xs=traj[:, 3], ys=traj[:, 4], zs=traj[:, 5], linestyle='-', color='b', alpha=0.6)
 
-    plt.draw()
+    # plt.draw()
 
     #train a learner
     if learner is None:
@@ -577,24 +586,34 @@ def EnCost_TrajAdaCtrl_Test(learner=None):
     vel_transp_exp = np.exp(-np.array(traj_learner.mode_phase_scales))
     vel_transp = vel_transp_exp / np.amax(vel_transp_exp)
 
-    # for mode_idx, mean_traj in enumerate(traj_learner.mean_trajs):
-    #     ax_pos.plot(xs=mean_traj[:, 0], ys=mean_traj[:, 1], zs=mean_traj[:, 2], color='k', linewidth=2.5, alpha=transp[mode_idx])
-    #     ax_vel.plot(xs=mean_traj[:, 3], ys=mean_traj[:, 4], zs=mean_traj[:, 5], color='k', linewidth=2.5, alpha=vel_transp[mode_idx])
-    # plt.draw()
+    pos_trajs = []
+    vel_trajs = []
+    for mode_idx, mean_traj in enumerate(traj_learner.mean_trajs):
+        pos_traj, = ax_pos.plot(xs=mean_traj[:, 0], ys=mean_traj[:, 1], zs=mean_traj[:, 2], color='b', linewidth=2.0, alpha=transp[mode_idx])
+        vel_traj, = ax_vel.plot(xs=mean_traj[:, 3], ys=mean_traj[:, 4], zs=mean_traj[:, 5], color='b', linewidth=2.0, alpha=transp[mode_idx])
+        pos_trajs.append(pos_traj)
+        vel_trajs.append(vel_traj)
+    plt.draw()
 
 
     ctrl = EnCost_ImpController(learner=traj_learner, update_dt=0.01, obs_tl=True)
 
-    ctrl.initialize_controller(mode=6, eigen_prob=0.9)
+    ctrl.initialize_controller(mode=1, eigen_prob=0.9)
     realized_state = ctrl.curr_state
     ctrl.realized_state_storage = realized_state
+
+    for tw in ctrl.track_weights[1]:
+        eig_val, _ =  np.linalg.eig(tw)
+        print np.real(eig_val)
+
+    return
 
     # print ctrl.mode_phase_scales
     step_cnt = 0
 
     realized_state_lst = []
     mode_belief_hist = []
-    perturb_acc = -50*0
+    perturb_acc = -30*0
     dt = ctrl.update_dt
     while 1:
         curr_mode, ref_state, ctrl_gain = ctrl.update(realized_state)
@@ -602,7 +621,7 @@ def EnCost_TrajAdaCtrl_Test(learner=None):
         if ref_state is None or ctrl_gain is None:
             break
         else:
-            if step_cnt > 30 and step_cnt < 55:
+            if step_cnt > 30 and step_cnt < 45:
                 #apply some disturbance that can be exploit to adapt to another mode...
                 #accelerate...
                 realized_state = ref_state
@@ -637,6 +656,13 @@ def EnCost_TrajAdaCtrl_Test(learner=None):
         vel_pnt.set_xdata(realized_traj[:realized_state_idx, 3])
         vel_pnt.set_ydata(realized_traj[:realized_state_idx, 4])
         vel_pnt.set_3d_properties(realized_traj[:realized_state_idx, 5])
+
+        #also update the transparency of pos and vel trajectories according to the realtime mode belief
+        transp_lst = mode_belief_hist[realized_state_idx] / np.amax(mode_belief_hist[realized_state_idx])
+        for mode_idx, transp in enumerate(transp_lst):
+            pos_trajs[mode_idx].set_alpha(transp)
+            vel_trajs[mode_idx].set_alpha(transp)
+
         plt.pause(0.01)
         # ax_pos.plot(xs=realized_traj[:realized_state_idx, 0], ys=realized_traj[:realized_state_idx, 1], zs=realized_traj[:realized_state_idx, 2], markersize=5.0, linestyle='*', color='k')
         # ax_vel.plot(xs=realized_traj[:realized_state_idx, 3], ys=realized_traj[:realized_state_idx, 4], zs=realized_traj[:realized_state_idx, 5], markersize=5.0, linestyle='*', color='k')

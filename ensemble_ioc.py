@@ -174,7 +174,7 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
             self.estimators_=em_res
 
         self.prepare_inv_and_constants()
-        return indices, leaf_idx, passive_likelihood_dict
+        return indices, leaf_idx, partitioned_data, passive_likelihood_dict
 
     def _em_steps(self, estimator_idx, X, y=None):
         #use current estimation as initialization to perform expectation-maximization
