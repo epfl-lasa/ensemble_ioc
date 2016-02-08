@@ -338,8 +338,8 @@ class EnCost_ImpController:
         # ref_pnt = self.ref_trajs[mode][idx, :]
         # weight_mat = self.track_weights[mode][idx]
 
-        cost = (obs - ref_pnt).dot(weight_mat.dot(obs-ref_pnt))
-        # cost = (obs[3:] - ref_pnt[3:]).dot((obs[3:] - ref_pnt[3:])) * 5.0
+        # cost = (obs - ref_pnt).dot(weight_mat.dot(obs-ref_pnt))
+        cost = (obs[3:] - ref_pnt[3:]).dot((obs[3:] - ref_pnt[3:])) * 5.0
         # cost = (obs - ref_pnt).dot(obs - ref_pnt) * 5.0
         return cost
     def evaluate_cost_to_go_ti_(self, mode, obs):
@@ -499,6 +499,7 @@ def EnCost_TrajLearner_Test():
     return
 
 import utils
+import matplotlib.animation as animation
 
 def EnCost_TrajAdaCtrl_Test(learner=None):
     n_samples = 20
@@ -592,7 +593,8 @@ def EnCost_TrajAdaCtrl_Test(learner=None):
     step_cnt = 0
 
     realized_state_lst = []
-    perturb_acc = 50
+    mode_belief_hist = []
+    perturb_acc = -50*0
     dt = ctrl.update_dt
     while 1:
         curr_mode, ref_state, ctrl_gain = ctrl.update(realized_state)
@@ -600,7 +602,7 @@ def EnCost_TrajAdaCtrl_Test(learner=None):
         if ref_state is None or ctrl_gain is None:
             break
         else:
-            if step_cnt > 50 and step_cnt < 125:
+            if step_cnt > 30 and step_cnt < 55:
                 #apply some disturbance that can be exploit to adapt to another mode...
                 #accelerate...
                 realized_state = ref_state
@@ -615,12 +617,33 @@ def EnCost_TrajAdaCtrl_Test(learner=None):
             realized_state = ref_state
             step_cnt+=1
             realized_state_lst.append(realized_state)
+            mode_belief_hist.append(ctrl.mode_belief)
 
     print 'use ', step_cnt, ' steps to execute the trajectory.'
     realized_traj = np.array(realized_state_lst)
-    #draw the realized state...
-    ax_pos.plot(xs=realized_traj[:, 0], ys=realized_traj[:, 1], zs=realized_traj[:, 2], linewidth=3.0, linestyle='-', color='k', alpha=1.0)
-    ax_vel.plot(xs=realized_traj[:, 3], ys=realized_traj[:, 4], zs=realized_traj[:, 5], linewidth=3.0, linestyle='-', color='k', alpha=0.5)
+    # draw the realized state...
+    # ax_pos.plot(xs=realized_traj[:, 0], ys=realized_traj[:, 1], zs=realized_traj[:, 2], linewidth=3.0, linestyle='-', color='k', alpha=1.0)
+    # ax_vel.plot(xs=realized_traj[:, 3], ys=realized_traj[:, 4], zs=realized_traj[:, 5], linewidth=3.0, linestyle='-', color='k', alpha=0.5)
+    # plt.draw()
+
+    raw_input('Press ENTER to start the animation...')
+    pos_pnt, = ax_pos.plot(xs=[realized_traj[0, 0]], ys=[realized_traj[0, 1]], zs=[realized_traj[0, 2]], linewidth=3.0, linestyle='-', color='k', alpha=1.0)
+    vel_pnt, = ax_vel.plot(xs=[realized_traj[0, 3]], ys=[realized_traj[0, 4]], zs=[realized_traj[0, 5]], linewidth=3.0, linestyle='-', color='k', alpha=1.0)
+    for realized_state_idx in range(1, len(realized_state_lst), 5):
+        #draw points...
+        pos_pnt.set_xdata(realized_traj[:realized_state_idx, 0])
+        pos_pnt.set_ydata(realized_traj[:realized_state_idx, 1])
+        pos_pnt.set_3d_properties(realized_traj[:realized_state_idx, 2])
+        vel_pnt.set_xdata(realized_traj[:realized_state_idx, 3])
+        vel_pnt.set_ydata(realized_traj[:realized_state_idx, 4])
+        vel_pnt.set_3d_properties(realized_traj[:realized_state_idx, 5])
+        plt.pause(0.01)
+        # ax_pos.plot(xs=realized_traj[:realized_state_idx, 0], ys=realized_traj[:realized_state_idx, 1], zs=realized_traj[:realized_state_idx, 2], markersize=5.0, linestyle='*', color='k')
+        # ax_vel.plot(xs=realized_traj[:realized_state_idx, 3], ys=realized_traj[:realized_state_idx, 4], zs=realized_traj[:realized_state_idx, 5], markersize=5.0, linestyle='*', color='k')
+        plt.draw()
+
+    # # fig.canvas.draw()
+    # ani = animation.FuncAnimation(fig, animate, len(realized_traj), interval=0.01, blit=False)
     plt.draw()
 
     return traj_learner
