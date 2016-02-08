@@ -1,6 +1,7 @@
 """
 Ensemble of cost function based (time-indexed) trajectory learner
 """
+import cPickle as cp
 from collections import defaultdict
 import numpy as np
 
@@ -153,8 +154,8 @@ class EnCost_TrajLearner():
         #<hyin/Feb-6th-2016> construct the averaged phase scale according to the passive likelihood...
         for e_idx in range(self.eioc_mdl.n_estimators):
             for l_idx in leaf_idx_dict[e_idx]:
-                self.mode_phase_scales.append(np.sum(np.array(passive_likelihood_dict[e_idx, l_idx]) * np.array(phase_scale_dict[e_idx, l_idx])))
-                self.mode_phase_scales_var.append(np.array(np.sum(np.array(passive_likelihood_dict[e_idx, l_idx]) * phase_scale_dict[e_idx, l_idx]) - self.mode_phase_scales[-1])**2)
+                self.mode_phase_scales.append(self.n_phases*np.sum(np.array(passive_likelihood_dict[e_idx, l_idx]) * np.array(phase_scale_dict[e_idx, l_idx])))
+                self.mode_phase_scales_var.append(self.n_phases**2 * np.array(np.sum(np.array(passive_likelihood_dict[e_idx, l_idx]) * phase_scale_dict[e_idx, l_idx]) - self.mode_phase_scales[-1])**2)
 
         for mode_idx, (mean_traj, traj_covar, traj_cost_const, weights) in enumerate(zip(    self.eioc_mdl.estimators_full_['means'],
                                                                                                 self.eioc_mdl.estimators_full_['covars'],
@@ -179,6 +180,256 @@ class EnCost_TrajLearner():
         assert(len(self.mode_phase_scales_var)) == len(self.mean_trajs)
         return
 
+    def unpickle(self, fname):
+        data =  cp.load(open(fname, 'rb'))
+        if 'mean_trajs' in data:
+            self.mean_trajs = data['mean_trajs']
+        if 'tracking_mats' in data:
+            self.tracking_mats = data['tracking_mats']
+        if 'cost_consts' in data:
+            self.cost_consts = data['cost_consts']
+        if 'mode_weights' in data:
+            self.mode_weights = data['mode_weights']
+        if 'mode_phase_scales' in data:
+            self.mode_phase_scales = data['mode_phase_scales']
+        if 'mode_phase_scales_var' in data:
+            self.mode_phase_scales_var = data['mode_phase_scales_var']
+
+        return
+
+    def pickle(self, fname):
+        f = file(fname, 'wb')
+        data = defaultdict(list)
+        if hasattr(self, 'mean_trajs'):
+            data['mean_trajs'] = self.mean_trajs
+        if hasattr(self, 'tracking_mats'):
+            data['tracking_mats'] = self.tracking_mats
+        if hasattr(self, 'cost_consts'):
+            data['cost_consts'] = self.cost_consts
+        if hasattr(self, 'mode_weights'):
+            data['mode_weights'] = self.mode_weights
+        if hasattr(self, 'mode_phase_scales'):
+            data['mode_phase_scales'] = self.mode_phase_scales
+        if hasattr(self, 'mode_phase_scales_var'):
+            data['mode_phase_scales_var'] = self.mode_phase_scales_var
+
+        cp.dump(data, f)
+        f.close()
+        return
+
+class EnCost_ImpController:
+    def __init__(self, 
+        learner,         
+        update_dt = 0.05, obs_tl=False):
+        self.learner = learner
+        self.update_dt = update_dt
+
+        self.model=None
+        self.n_modes=None
+        self.trans_mat=None
+        self.mode_belief=None
+        self.ref_trajs = []
+        self.track_weights = []
+        self.feedback_gains = []
+        self.mode_phase_scales = []
+        self.mode_phase_scales_var = []
+        self.curr_state = None
+        self.realized_state_storage = None
+        self.obs_tl=obs_tl
+
+        return
+
+    def initialize_controller(self, mode=None, eigen_prob=0.9):
+        if self.learner is None:
+            print 'The ensemble cost model is not initialized yet.'
+            return
+        else:
+            print 'Reinitialize the controller...'
+            print 'The original reference command and feedback gain will be reset'
+            self.ref_trajs = []
+            self.track_weights = []
+            self.feedback_gains = []
+            self.cost_consts = []
+            self.mode_weights = []
+            self.mode_phase_scales = []
+            self.mode_phase_scales_var = []
+
+        self.ref_trajs = self.learner.mean_trajs
+        self.track_weights = self.learner.tracking_mats
+        self.cost_consts = self.learner.cost_consts
+        self.mode_weights = self.learner.mode_weights
+        self.mode_phase_scales = self.learner.mode_phase_scales
+        self.mode_phase_scales_var = self.learner.mode_phase_scales_var
+
+        self.n_modes        = len(self.ref_trajs)
+        print '{0} modes of ensemble models are loaded.'.format(self.n_modes)
+        # self.mode_belief    = np.zeros(self.n_modes)
+        self.mode_belief    = np.ones(self.n_modes) * (1.0-eigen_prob)/(self.n_modes-1)
+        if mode is None:
+            b_rand_mode = True
+        elif mode > self.n_modes or mode < 0:
+            b_rand_mode = True
+        else:
+            b_rand_mode = False
+
+        if b_rand_mode:
+            print 'use a random mode.'
+            init_mode = np.random.choice(self.n_modes)
+        else:
+            print 'use specified mode'
+            init_mode = mode
+
+        # self.mode_belief[init_mode] = 1.0
+        self.curr_mode = init_mode
+        self.mode_belief[init_mode] = eigen_prob
+
+        #for transition matrix - the belief propagation of mode
+        self.trans_mat = np.ones((self.n_modes, self.n_modes)) * (1.0-eigen_prob)/(self.n_modes-1)
+        for mode_idx in range(self.n_modes):
+            self.trans_mat[mode_idx, mode_idx] = eigen_prob
+
+        #initialize the sensory perception
+        self.set_sensor_feedback(self.ref_trajs[init_mode][0, :])
+        #note that the phase index is actually related to the trajectory length...
+        self.curr_idx = np.zeros(self.n_modes)
+        return
+
+    def set_sensor_feedback(self, obs):
+        """
+        the observation should be concrete sensed spatial coordinate
+        which might subject to both command as well as external perturbation
+        """
+        self.curr_state = obs
+        return
+
+    def get_interp_fdfwd_and_fdbck_(self, mode, p):
+        #for feedforward trajector command (reference regulation), use linear intepolation
+        #use zero order hold for tracking mat...
+        #note here we use the tracking mat as a surrogate of the feedback gain, that's because
+        #we dont have explicit conrol effort regulation
+        floor_idx = int(np.floor(p))
+        ceil_idx = int(np.ceil(p))
+        if ceil_idx >= len(self.ref_trajs[mode]):
+            #reach the end...
+            return self.ref_trajs[mode][-1, :], self.track_weights[mode][-1]
+        else:
+            ref_traj_interp = (self.ref_trajs[mode][ceil_idx, :] - self.ref_trajs[mode][floor_idx, :]) * (p - floor_idx) + self.ref_trajs[mode][floor_idx, :]
+            if p - floor_idx > 0.5:
+                tracking_mats_zero_order = self.track_weights[mode][ceil_idx]
+            else:
+                tracking_mats_zero_order = self.track_weights[mode][floor_idx]
+
+            return ref_traj_interp, tracking_mats_zero_order
+
+    def evaluate_cost_to_go_(self, mode, obs, t_idx=None):
+        """
+        evaluate the cost-to-go for given observation and mode, if t_idx is not given use the current one
+        """
+        if t_idx is None:
+            idx = self.curr_idx[mode]
+        else:
+            idx = t_idx
+
+        #<hyin/Feb-7th-2016> note the idx might not neessarily to be an integer now
+        #in fact, it's a float phase variable indicating the process evolution
+        #so we need some intepolation to deal with the reference trajectory and tracking weights...
+        ref_pnt, weight_mat = self.get_interp_fdfwd_and_fdbck_(mode, idx)
+
+        # ref_pnt = self.ref_trajs[mode][idx, :]
+        # weight_mat = self.track_weights[mode][idx]
+
+        cost = (obs - ref_pnt).dot(weight_mat.dot(obs-ref_pnt))
+        # cost = (obs[3:] - ref_pnt[3:]).dot((obs[3:] - ref_pnt[3:])) * 5.0
+        # cost = (obs - ref_pnt).dot(obs - ref_pnt) * 5.0
+        return cost
+    def evaluate_cost_to_go_ti_(self, mode, obs):
+        """
+        evaluate the cost-to-go for given observation and mode, in a time invariant manner...
+        in fact we take the evaluation of cost-to-go along the mode trajectory and choose the most_probable_mode_idx
+        probable one as the trajectory cost-to-go, remember to also decide the phase index (current task completion)
+        """
+        cost_to_go_traj = [(obs - ref_pnt).dot(weight_mat.dot(obs-ref_pnt)) for ref_pnt, weight_mat in zip(self.ref_trajs[mode], self.track_weights[mode])]
+        #take the smallest one
+        min_idx = np.argmin(cost_to_go_traj)
+        return min_idx, cost_to_go_traj[min_idx]
+
+    def update_mode_state(self):
+        """
+        update the internal belief about the mode of ensemble models
+        P(s'|o', o'', ..., o^0) \prop P(s', o', o, ..., o^0) = P(o'|s')P(s'|o, ..., o^0)
+        = P(o'|s') \int_{s} P(s'|s) P(s|o, ..., o^0)
+        
+        P(s'|s, o') \prop P(s', s, o') = P(o'|s')P(s'|s)P(s)
+        """
+        #propagate of mode belief P(s'|s)
+        tmp_mode_belief = self.trans_mat.dot(self.mode_belief)
+
+        #observational model P(o'|s')
+        if not self.obs_tl:
+            obs_likelihood = np.array([ np.exp(-self.evaluate_cost_to_go_(mode_idx, self.curr_state, self.curr_idx[mode_idx])) for mode_idx in range(self.n_modes) ])
+        else:
+            ti_cost_eval = np.array([ list(self.evaluate_cost_to_go_ti_(mode_idx, self.curr_state)) for mode_idx in range(self.n_modes) ])
+            obs_likelihood = np.exp(-ti_cost_eval[:, 1])
+            most_probable_phase_idx = ti_cost_eval[:, 0]
+
+
+        #normalize
+        obs_likelihood = obs_likelihood / np.sum(obs_likelihood)
+
+        new_mode_belief = tmp_mode_belief * obs_likelihood
+        #normalize
+        new_mode_belief = new_mode_belief/np.sum(new_mode_belief)
+
+        #update
+        self.mode_belief = new_mode_belief
+
+        #refresh the index if needed...
+        if self.obs_tl:
+            most_probable_mode = np.argmax(self.mode_belief)
+            if most_probable_mode != self.curr_mode:
+                self.curr_idx[most_probable_mode] = most_probable_phase_idx[most_probable_mode]
+        return new_mode_belief
+
+    def get_control_command(self):
+        """
+        get control command according to current observation and belief regarding the internal mode
+        """
+        #decision-making: maximum-posterior estimation instead of taking average...
+        #the average decision might also work, but then that seems to be similar to other statistical model...
+        most_probable_mode_idx = np.argmax(self.mode_belief)
+        #derive controller with this local mode...
+        #<hyin/Feb-7th-2016> note the current idx are a list of float phase variables...
+        # ref_cmd = self.ref_trajs[most_probable_mode_idx][self.curr_idx]
+        # ctrl_gain = self.feedback_gains[most_probable_mode_idx][self.curr_idx]
+        ref_cmd, ctrl_gain = self.get_interp_fdfwd_and_fdbck_(most_probable_mode_idx, self.curr_idx[most_probable_mode_idx])
+        return most_probable_mode_idx, ref_cmd, ctrl_gain
+
+    def update(self, obs):
+        """
+        controller to wrap up the above perception/inference/decision subroutines
+        """
+        #<hyin/Feb-7th-2016> note the current idx are a list of float phase variables...
+        #check if the current mode has finished or not...
+        most_probable_mode_idx = np.argmax(self.mode_belief)
+
+        if self.curr_idx[ most_probable_mode_idx ] > len(self.ref_trajs[0]):
+            print 'Finish sending the trajectory command.'
+            return None, None, None
+        #first update belief according to the obs
+        self.set_sensor_feedback(obs)
+        self.update_mode_state()
+        # print self.curr_idx
+        self.curr_mode, ref_cmd, ctrl_gain = self.get_control_command()
+
+        #update the index of command
+        if not self.obs_tl:
+            self.curr_idx += float(self.update_dt) / np.array(self.mode_phase_scales) * len(self.ref_trajs[0])
+        else:
+            #only consider current mode
+            self.curr_idx[self.curr_mode] += float(self.update_dt) / np.array(self.mode_phase_scales[self.curr_mode]) * len(self.ref_trajs[0])
+
+
+        return self.curr_mode, ref_cmd, ctrl_gain
 """
 Unit test:
 Generate a few trajectories with two modes, and use the traj learner to encode them...
@@ -243,6 +494,134 @@ def EnCost_TrajLearner_Test():
     for mode_idx, mean_traj in enumerate(traj_learner.mean_trajs):
         ax.plot(xs=mean_traj[:, 0], ys=mean_traj[:, 1], zs=mean_traj[:, 2], color='k', linewidth=2.5, alpha=transp[mode_idx])
     plt.draw()
+
+    # traj_learner.pickle('test.pkl')
     return
 
+import utils
+
+def EnCost_TrajAdaCtrl_Test(learner=None):
+    n_samples = 20
+    radius=0.5
+    #a spatial circular path from [0, 0, 0] to [1, 1, 1]
+    angulars = np.linspace(0, np.pi, 100)
+    cir_path = np.array([
+        radius * (1 - np.cos(angulars)) * np.cos(np.pi/4),
+        radius * (1 - np.cos(angulars)) * np.sin(np.pi/4),
+        radius * np.sin(angulars)
+        ]).T
+    #fit function approximators for the spatial path
+    n_phases = 100
+    z = np.linspace(0, 1.0, n_phases)
+    fa_lst = [pyrbf_fa.PyRBF_FunctionApproximator(rbf_type='sigmoid', K=10, normalize=True) for dof in range(len(cir_path[0, :]))]
+    dof_samples = []
+
+    for dof in range(len(cir_path[0, :])):
+        path_fa = fa_lst[dof]
+        path_fa.set_linear_equ_constraints([z[0], z[-1]], [cir_path[0, dof], cir_path[-1, dof]])
+        path_fa.fit(z, cir_path[:, dof], replace_theta=True)
+        dof_samples.append(path_fa.gaussian_sampling(noise=0.001, n_samples=n_samples))
+
+    #generate trajectories with different velocity...
+    gen_trajs = []
+    n_velgrp = 4
+    n_grpsamples = n_samples/n_velgrp
+    for i in range(n_velgrp):
+        n_phases = 100 + i * 150
+        test_z = np.linspace(0.0, 1.0, n_phases)
+        sub_traj_lst = []
+        for dof_idx, dof_theta_samples in enumerate(dof_samples):
+            dof_theta_slices = dof_theta_samples[(i*n_grpsamples):((i+1)*n_grpsamples), :]
+            #for these group of theta samples, evaluate corresponding to the desired time length
+            tmp_dof_trajs = [fa_lst[dof_idx].evaluate(test_z, theta) for theta in dof_theta_slices]
+            sub_traj_lst.append(tmp_dof_trajs)
+
+        sub_traj_lst_recons = [np.array([sub_traj_lst[dof_idx][sample_idx] for dof_idx in range(len(fa_lst))]).T for sample_idx in range(n_grpsamples)]
+        gen_trajs = gen_trajs + sub_traj_lst_recons
+    #expand to also include the velocity as state
+    aug_traj_data = utils.expand_traj_dim_with_derivative(gen_trajs)
+    #interp again with fixed number of phases
+    interp_data, phase_scale = utils.interp_data_fixed_num_phases(aug_traj_data, dt=0.01, num=100)
+
+    #show the data...
+    plt.ion()
+    fig = plt.figure()
+    ax_pos = fig.add_subplot(121, projection='3d')
+    ax_vel = fig.add_subplot(122, projection='3d')
+    ax_pos.hold(True)
+    ax_vel.hold(True)
+    ax_pos.set_aspect('equal')
+    ax_vel.set_aspect('equal')
+    # ax_pos.plot(xs=cir_path[:, 0], ys=cir_path[:, 1], zs=cir_path[:, 2], color='k', alpha=0.8)
+    # ax_pos.plot(xs=aug_traj_data[5][:, 0], ys=aug_traj_data[5][:, 1], zs=aug_traj_data[5][:, 2], color='b')
+    for traj, scale in zip(interp_data, phase_scale):
+        ax_pos.plot(xs=traj[:, 0], ys=traj[:, 1], zs=traj[:, 2], linestyle='--', color='b', alpha=0.6)
+        ax_vel.plot(xs=traj[:, 3], ys=traj[:, 4], zs=traj[:, 5], linestyle='-', color='b', alpha=0.6)
+
+    plt.draw()
+
+    #train a learner
+    if learner is None:
+        traj_learner = EnCost_TrajLearner(n_estimators=5, passive_type=None, verbose=True)
+        traj_learner.train(data=interp_data, phase_scale=phase_scale)
+    else:
+        traj_learner = learner
+
+    #plot reference trajectory for each mode
+    transp = traj_learner.mode_weights * np.exp(-np.mean(np.array(traj_learner.cost_consts), axis=1)
+        ) / np.amax(np.array(traj_learner.mode_weights) * 
+        np.exp(-np.mean(np.array(traj_learner.cost_consts), axis=1)))
+
+    # print traj_learner.mode_phase_scales
+    vel_transp_exp = np.exp(-np.array(traj_learner.mode_phase_scales))
+    vel_transp = vel_transp_exp / np.amax(vel_transp_exp)
+
+    # for mode_idx, mean_traj in enumerate(traj_learner.mean_trajs):
+    #     ax_pos.plot(xs=mean_traj[:, 0], ys=mean_traj[:, 1], zs=mean_traj[:, 2], color='k', linewidth=2.5, alpha=transp[mode_idx])
+    #     ax_vel.plot(xs=mean_traj[:, 3], ys=mean_traj[:, 4], zs=mean_traj[:, 5], color='k', linewidth=2.5, alpha=vel_transp[mode_idx])
+    # plt.draw()
+
+
+    ctrl = EnCost_ImpController(learner=traj_learner, update_dt=0.01, obs_tl=True)
+
+    ctrl.initialize_controller(mode=6, eigen_prob=0.9)
+    realized_state = ctrl.curr_state
+    ctrl.realized_state_storage = realized_state
+
+    # print ctrl.mode_phase_scales
+    step_cnt = 0
+
+    realized_state_lst = []
+    perturb_acc = 50
+    dt = ctrl.update_dt
+    while 1:
+        curr_mode, ref_state, ctrl_gain = ctrl.update(realized_state)
+        print 'current mode idx:', curr_mode
+        if ref_state is None or ctrl_gain is None:
+            break
+        else:
+            if step_cnt > 50 and step_cnt < 125:
+                #apply some disturbance that can be exploit to adapt to another mode...
+                #accelerate...
+                realized_state = ref_state
+                vel_dir = realized_state[3:] / np.linalg.norm(realized_state[3:])
+
+                realized_state[3:] += vel_dir * dt * perturb_acc
+                realized_state[:3] += .5 * vel_dir * perturb_acc * dt**2
+                # print 'perturbation applied...'
+            else:
+                #assume the state command is perfectly realized
+                realized_state = ref_state
+            realized_state = ref_state
+            step_cnt+=1
+            realized_state_lst.append(realized_state)
+
+    print 'use ', step_cnt, ' steps to execute the trajectory.'
+    realized_traj = np.array(realized_state_lst)
+    #draw the realized state...
+    ax_pos.plot(xs=realized_traj[:, 0], ys=realized_traj[:, 1], zs=realized_traj[:, 2], linewidth=3.0, linestyle='-', color='k', alpha=1.0)
+    ax_vel.plot(xs=realized_traj[:, 3], ys=realized_traj[:, 4], zs=realized_traj[:, 5], linewidth=3.0, linestyle='-', color='k', alpha=0.5)
+    plt.draw()
+
+    return traj_learner
 

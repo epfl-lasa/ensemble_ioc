@@ -150,6 +150,9 @@ class PyRBF_FunctionApproximator():
         '''
         if theta is None:
             mean = self.theta_
+        else:
+            mean = theta
+            
         if noise is None:
             covar = np.eye(len(self.theta_))
         elif isinstance(noise, int) or isinstance(noise, float):
@@ -158,12 +161,13 @@ class PyRBF_FunctionApproximator():
             covar = noise
 
         #make white gaussian because we might need to apply the linear constraints...
+        #<hyin/Feb-07th-2016> hmm, actually this is shifted noise, so remember not to apply that again
         samples = np.random.multivariate_normal(mean, covar, n_samples)
         if self.apply_lin_cons is None:
-            res = samples + mean
+            res = samples
         else:
             #apply linear constraint to apply the null-space perturbation
-            res = [self.apply_lin_cons(s) + mean for s in samples]
+            res = [self.apply_lin_cons(s) for s in samples]
         return np.array(res)
 
 
@@ -195,7 +199,7 @@ def PyRBF_FuncApprox_Test():
     #test for sampling and apply linear constrains
     raw_input('Press ENTER to continue the test of random sampling')
     rbf_mdl = PyRBF_FunctionApproximator(rbf_type='gaussian', K=10, normalize=True)
-    y = np.zeros(len(z))
+    y = np.sin(np.linspace(0.0, np.pi, len(z)))
     res_theta = rbf_mdl.fit(z, y, True)
     print 'fit parameters:', res_theta
     #anchoring the initial point...
