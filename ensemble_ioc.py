@@ -586,8 +586,9 @@ def _log_multivariate_normal_density_full(X, means, covars, min_covar=1.e-7):
 
 def _passive_dyn_likelihood(X_new, X_new_passive, passive_dyn_noise, passive_dyn_ctrl, reg=1e-5):
     #regularized sigma
-    sigma = passive_dyn_noise*passive_dyn_ctrl + reg*np.eye(X_new.shape[1])    
-    denom = ((2*np.pi)**(X_new.shape[1])*np.linalg.det(sigma))**.5
+    sigma = passive_dyn_noise*passive_dyn_ctrl + reg*np.eye(X_new.shape[1])   
+    #<hyin/Feb-9th-2016> slightly modify the sequence to prevent potential overflow issue
+    denom = ((2*np.pi)**(X_new.shape[1]/2.0))*np.linalg.det(sigma)**.5
     err = X_new - X_new_passive
     err_prod = err.dot(np.linalg.pinv(sigma))
     quad_term = np.array([e.dot(ep) for e, ep in zip(err, err_prod)])

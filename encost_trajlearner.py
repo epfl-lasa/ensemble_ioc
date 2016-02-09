@@ -492,7 +492,7 @@ def EnCost_TrajLearner_Test():
     plt.draw()
 
     #try the trajectory learner
-    traj_learner = EnCost_TrajLearner(n_estimators=5, passive_type=None, verbose=True)
+    traj_learner = EnCost_TrajLearner(n_estimators=5, min_samples_split=3, min_samples_leaf=3, passive_type=None, verbose=True)
     traj_learner.train(data=data)
 
     #see the mean trajs

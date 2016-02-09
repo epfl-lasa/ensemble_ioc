@@ -9,6 +9,108 @@ import scipy
 from scipy import interpolate
 import scipy.ndimage as spi
 
+from mpl_toolkits.mplot3d import Axes3D
+import matplotlib.pyplot as plt
+
+def load_data_from_txt_file(fname, skip_header_ratio=0.1, skip_rear_ratio=0.1):
+    """
+    load the trajectory data from the txt file which contains a stream of ros type PoseStamped data type
+    the function concerning the field of position.x:y:z
+    skip_header_ratio/skip_rear_ratio decide the proportional data to omit because the sensor reading for these period of time
+    might be meaningless
+    """
+    full_data = np.genfromtxt(fname, delimiter=',', skip_header=1, converters={3: lambda s: float(s or 0)})
+    len_data = len(full_data)
+    position_field_idx = [4, 5, 6]
+    data_clip = full_data[int(len_data*skip_header_ratio):int(len_data*(1-skip_rear_ratio)), position_field_idx]
+    return data_clip
+
+def display_spatial_trajectory_data(data):
+    """
+    data would be a list of spatial trajectories with row as a 3-dimension state variable...
+    """
+    """
+    <hyin/Feb-9th-2016> the 3d plotting of matplotlib hasn't resolve the equal axis issue
+    use a workaround by forcing the axis limit
+    """
+    max_lst = []
+    min_lst = []
+    mean_lst = []
+    for d in data:
+        max_lst.append(np.amax(d, axis=0))
+        min_lst.append(np.amin(d, axis=0))
+        mean_lst.append(np.mean(d, axis=0))
+
+    #figure out the max & min for each dimension throughout the whole data...
+    max_coord = np.amax(max_lst, axis=0)
+    min_coord = np.amin(min_lst, axis=0)
+    mean_coord = np.mean(mean_lst, axis=0)
+
+    plt.ion()
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+    ax.hold(True)
+    
+    for d in data:
+        ax.plot(xs=d[:, 0], ys=d[:, 1], zs=d[:, 2], linestyle='--', color='b', alpha=0.6)
+
+    ax_lim = [mean_coord - np.max((max_coord-min_coord))/2.0, mean_coord + np.max((max_coord-min_coord))/2.0]
+    ax.set_xlim(ax_lim[0][0], ax_lim[1][0])
+    ax.set_ylim(ax_lim[0][1], ax_lim[1][1])
+    ax.set_zlim(ax_lim[0][2], ax_lim[1][2])
+
+    plt.draw()
+    
+    return
+
+def display_spatial_trajectory_pos_and_vel_data(data):
+    """
+    data would be a list of spatial trajectories with row as a 6-dimension state variable...
+    with the first 3 dimensions as position and the remained 3 dimensions as velocity
+    """
+    """
+    <hyin/Feb-9th-2016> the 3d plotting of matplotlib hasn't resolve the equal axis issue
+    use a workaround by forcing the axis limit
+    """
+    max_lst = []
+    min_lst = []
+    mean_lst = []
+    for d in data:
+        max_lst.append(np.amax(d, axis=0))
+        min_lst.append(np.amin(d, axis=0))
+        mean_lst.append(np.mean(d, axis=0))
+
+    #figure out the max & min for each dimension throughout the whole data...
+    max_coord = np.amax(max_lst, axis=0)
+    min_coord = np.amin(min_lst, axis=0)
+    mean_coord = np.mean(mean_lst, axis=0)
+
+    plt.ion()
+    fig = plt.figure()
+    ax_pos = fig.add_subplot(121, projection='3d')
+    ax_vel = fig.add_subplot(122, projection='3d')
+    ax_pos.hold(True)
+    ax_vel.hold(True)
+    
+    for d in data:
+        ax_pos.plot(xs=d[:, 0], ys=d[:, 1], zs=d[:, 2], linestyle='--', color='b', alpha=0.6)
+        ax_vel.plot(xs=d[:, 3], ys=d[:, 4], zs=d[:, 5], linestyle='--', color='b', alpha=0.6)
+
+    ax_pos_lim = [mean_coord[:3] - np.max((max_coord-min_coord)[:3])/2.0, mean_coord[:3] + np.max((max_coord-min_coord)[:3])/2.0]
+    ax_vel_lim = [mean_coord[3:] - np.max((max_coord-min_coord)[3:])/2.0, mean_coord[3:] + np.max((max_coord-min_coord)[3:])/2.0]
+
+    ax_pos.set_xlim(ax_pos_lim[0][0], ax_pos_lim[1][0])
+    ax_pos.set_ylim(ax_pos_lim[0][1], ax_pos_lim[1][1])
+    ax_pos.set_zlim(ax_pos_lim[0][2], ax_pos_lim[1][2])
+
+    ax_vel.set_xlim(ax_vel_lim[0][0], ax_vel_lim[1][0])
+    ax_vel.set_ylim(ax_vel_lim[0][1], ax_vel_lim[1][1])
+    ax_vel.set_zlim(ax_vel_lim[0][2], ax_vel_lim[1][2])
+
+    plt.draw()
+    
+    return
+
 def smooth_data(data, size=3):
     """
     a function to smooth trajectories
