@@ -12,7 +12,7 @@ import scipy.ndimage as spi
 from mpl_toolkits.mplot3d import Axes3D
 import matplotlib.pyplot as plt
 
-def load_data_from_txt_file(fname, skip_header_ratio=0.1, skip_rear_ratio=0.1):
+def load_data_from_txt_file(fname, position_field_idx = [4, 5, 6], skip_header_ratio=0.1, skip_rear_ratio=0.1):
     """
     load the trajectory data from the txt file which contains a stream of ros type PoseStamped data type
     the function concerning the field of position.x:y:z
@@ -21,7 +21,6 @@ def load_data_from_txt_file(fname, skip_header_ratio=0.1, skip_rear_ratio=0.1):
     """
     full_data = np.genfromtxt(fname, delimiter=',', skip_header=1, converters={3: lambda s: float(s or 0)})
     len_data = len(full_data)
-    position_field_idx = [4, 5, 6]
     data_clip = full_data[int(len_data*skip_header_ratio):int(len_data*(1-skip_rear_ratio)), position_field_idx]
     return data_clip
 
