@@ -204,3 +204,16 @@ def expand_traj_dim_with_derivative(data, dt=0.01):
             augmented_trajs.append(tmp_augmented_traj)
 
     return augmented_trajs
+
+def extract_traj_dim(data, dims):
+    """
+    extract the specific dimensions of data
+    """
+    res_data = [d[:, dims] for d in data]
+    
+
+    return res_data
+
+def augment_traj_dim(data, aug_data):
+    res_data = [np.vstack([d.T, aug_d.T]).T for d, aug_d in zip(data, aug_data)]
+    return res_data
