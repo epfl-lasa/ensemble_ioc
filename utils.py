@@ -217,3 +217,66 @@ def extract_traj_dim(data, dims):
 def augment_traj_dim(data, aug_data):
     res_data = [np.vstack([d.T, aug_d.T]).T for d, aug_d in zip(data, aug_data)]
     return res_data
+
+def regularized_persudo_inverse(mat, reg=1e-5):
+    """
+    Use SVD to realize persudo inverse by perturbing the singularity values
+    """
+    u, s, v = np.linalg.svd(mat)
+    diag_s_inv = np.zeros((v.shape[0], u.shape[1]))
+    diag_s_inv[0:len(s), 0:len(s)] = np.diag(1./(s+reg))
+    return v.dot(diag_s_inv).dot(u.T)
+
+def moving_window_indices(max_len, window_size=5):
+    """
+    A helper function to generate moving windows containing the indices
+    Note the number of groups of indcies is same as the length
+    The windows at boundaries contain less indices
+    """
+    def window_indices(idx):
+        if idx < (window_size+1)/2:
+            return range(idx+(window_size+1)/2)
+        elif max_len - idx - 1 < (window_size-1)/2:
+            return range(idx - (window_size-1)/2, max_len)
+        else:
+            return range(idx - (window_size-1)/2, idx + (window_size-1)/2 + 1)
+    indices = [window_indices(idx) for idx in range(max_len)]
+    return indices
+
+"""
+finite difference matrices for forward/backward/central finite difference
+with respect to a one-dimensional trajectory
+"""
+def forward(size):
+ """ returns a toeplitz matrix
+   for forward differences
+ """
+ r = zeros(size)
+ c = zeros(size)
+ r[0] = -1
+ r[size-1] = 1
+ c[1] = 1
+ return toeplitz(r,c)
+
+def backward(size):
+ """ returns a toeplitz matrix
+   for backward differences
+ """
+ r = zeros(size)
+ c = zeros(size)
+ r[0] = 1
+ r[size-1] = -1
+ c[1] = -1
+ return toeplitz(r,c).T
+
+def central(size):
+ """ returns a toeplitz matrix
+   for central differences
+ """
+ r = zeros(size)
+ c = zeros(size)
+ r[1] = .5
+ r[size-1] = -.5
+ c[1] = -.5
+ c[size-1] = .5
+ return toeplitz(r,c).T
