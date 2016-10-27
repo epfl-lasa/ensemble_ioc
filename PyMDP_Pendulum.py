@@ -141,7 +141,7 @@ def PendulumTransitionTest():
 
     pendulum = PendulumDynSys(dt=0.01)
     pendulumMDP = MarkovDecisionProcess(gamma=0.95)
-    xbins = [np.linspace(0, 2*np.pi, 51), np.linspace(-2.5, 2.5, 51)]
+    xbins = [np.linspace(0, 2*np.pi, 51), np.linspace(-10, 10, 51)]
     ubins = [np.linspace(-5.0, 5.0, 21)]
     action_idx = 10
 
@@ -174,7 +174,7 @@ def PendulumTransitionTest():
                     print 'Inconsistent length of state and noise vector...'
                     return
                 #wrap x_new if needed, this is useful for state variable like angular position
-                x_new_mu[wrap_idx] = np.mod(x_new_mu[wrap_idx] - xmin[wrap_idx], 
+                x_new_mu[wrap_idx] = np.mod(x_new_mu[wrap_idx] - xmin[wrap_idx],
                     xmax[wrap_idx] - xmin[wrap_idx]) + xmin[wrap_idx]
                 x_new_mu_idx = xdigitize(x_new_mu)
                 x_new_mu_digitized_state = pendulumMDP.S_[:, sub2ind(x_new_mu_idx)]
@@ -192,7 +192,7 @@ def PendulumTransitionTest():
                     x_new_mu_tmp_max[dim_idx] +=  2*x_new_sig[dim_idx]
                     min_idx = xdigitize_dim(x_new_mu_tmp_min, dim_idx)
                     max_idx = xdigitize_dim(x_new_mu_tmp_max, dim_idx)
-                    
+
                     for step_idx in range(min_idx, max_idx+1):
                         tmp_x_new_mu_idx[dim_idx] = step_idx
                         #get the index of involved state
@@ -252,7 +252,7 @@ def PendulumTransitionTest():
     print state_old_idx, pendulumMDP.S_[:, state_old_idx]
 
     for i in range(time_step):
-        
+
         x_new_from_dyn = pendulum.Dynamics(x_old_from_dyn, [0])
         if isinstance(x_new_from_dyn, list):
             x_new_from_dyn = x_new_from_dyn[0]
@@ -277,7 +277,7 @@ def PendulumTrucateState(x, xmin, xmax, wrap_idx):
     x_new = np.array(x)
     # it seems this complicates the problem...
     # we need to be very careful when caculating mean of states...
-    # x_new[wrap_idx] = np.mod(x_new[wrap_idx] - xmin[wrap_idx], 
+    # x_new[wrap_idx] = np.mod(x_new[wrap_idx] - xmin[wrap_idx],
     #                 xmax[wrap_idx] - xmin[wrap_idx]) + xmin[wrap_idx]
     for dim_idx in range(len(x)):
         if x_new[dim_idx] > xmax[dim_idx]:
@@ -326,8 +326,8 @@ def pendulum_traj_draw(traj, ax=None):
     utils.add_arrow_to_line2D(ax, line)
     return ax
 
-def PendulumMDPTest():
-    
+def PendulumMDPTest(gamma=0.99, user_cost=None):
+
     def pendulum_lqr_cost(x, u, sys=None):
         xd = np.array([np.pi, 0])
 
@@ -340,9 +340,9 @@ def PendulumMDPTest():
 
         thres = 0.05
         if np.linalg.norm((x-xd)*np.array([1, 1]))**2 < thres:
-            c = 0 
+            c = 0
         else:
-            c = 1 
+            c = 1
         return c
 
     def pendulum_value_func_draw(mdp, J, ax=None):
@@ -352,7 +352,7 @@ def PendulumMDPTest():
             fig = plt.figure()
             ax = fig.add_subplot(111)
 
-        ax.pcolormesh(mdp.xbins_[0], mdp.xbins_[1], 
+        ax.pcolormesh(mdp.xbins_[0], mdp.xbins_[1],
             np.reshape(J, (len(mdp.xbins_[1]), len(mdp.xbins_[0]))),
             shading='none')
         ax.set_xlabel('x (rad)', fontsize=16)
@@ -366,9 +366,13 @@ def PendulumMDPTest():
         return ax
 
     pendulum = PendulumDynSys(dt=0.01)
-    pendulumMDP = MarkovDecisionProcess(gamma=0.999)
+    pendulumMDP = MarkovDecisionProcess(gamma=gamma)
 
-    cost_func = pendulum_lqr_cost
+    if user_cost is None:
+        cost_func = pendulum_lqr_cost
+    else:
+        cost_func = user_cost
+
     ulim = 5.0
 
     # cost_func = pendulum_mintime_cost
@@ -390,7 +394,7 @@ def PendulumMDPTest():
     Q_opt = opt_res['action_value_opt']
 
     ax = pendulum_value_func_draw(pendulumMDP, J_opt, ax=None)
-    
+
     #generate some trajectories from Q_opt
     N = 500
     x0_lst = np.random.random((N, 2))
@@ -441,7 +445,7 @@ def PendulumMDPValueLearningBuildData(traj_lst, rand_size=40, tail_cut=100, nois
 def PendulumMDPValueLearning(data, sys, n_est=50, rs=0, em_itrs=0, mdp=None):
 
     #train with EnsembleIOC
-    mdl=eioc.EnsembleIOC(n_estimators=n_est, max_depth=3, random_state=rs, em_itrs=em_itrs, min_samples_split=10, min_samples_leaf=5, regularization=0.001, 
+    mdl=eioc.EnsembleIOC(n_estimators=n_est, max_depth=3, random_state=rs, em_itrs=em_itrs, min_samples_split=10, min_samples_leaf=5, regularization=0.001,
         passive_dyn_func=sys.PassiveDynamics, passive_dyn_ctrl=np.array([[0, 0], [0, 1]]), passive_dyn_noise=1e-3, verbose=True)
     mdl.fit(X=data)
 
@@ -474,7 +478,7 @@ def PendulumMDPValueLearningTest(opt_res):
             fig = plt.figure()
             ax = fig.add_subplot(111)
 
-        pcol = ax.pcolormesh(x, x_dot, 
+        pcol = ax.pcolormesh(x, x_dot,
             np.reshape(J, (len(x_dot), len(x))),
             shading='none')
         pcol.set_edgecolor('face')
@@ -493,17 +497,17 @@ def PendulumMDPValueLearningTest(opt_res):
 
 def PendulumMDPValueLearningError(opt_res):
     M = [1, 3, 5, 15, 30, 50, 75, 100]
-    
+
     m_itrs = [0, 1, 3, 5, 10]
     pendulum = PendulumDynSys(dt=0.01)
     traj_lst = opt_res['traj_opt']
-    train_data, test_data = PendulumMDPValueLearningBuildData(traj_lst)  
+    train_data, test_data = PendulumMDPValueLearningBuildData(traj_lst)
     test_data_old = test_data[:, 0:test_data.shape[1]/2]
     test_data_new = test_data[:, test_data.shape[1]/2:]
-    test_data_new_passive = None 
+    test_data_new_passive = None
     # J_opt = opt_res['value_opt']
 
-    # J_opt_normed = (J_opt - np.mean(J_opt)) 
+    # J_opt_normed = (J_opt - np.mean(J_opt))
     run_num_itrs = 10
     err_lst_full = []
     for m_itr in m_itrs:
@@ -564,7 +568,7 @@ def PendulumMDPValueLearningErrorDraw(err_lst_full, M, m_itrs):
     lines = []
     legend_txt = []
     for m_idx, m_itr in enumerate(m_itrs):
-        line, _ = utils.draw_err_bar_with_filled_shape(ax, M, 
+        line, _ = utils.draw_err_bar_with_filled_shape(ax, M,
             np.mean(err_lst_full[m_idx], axis=1), np.std(err_lst_full[m_idx], axis=1), colors[m_idx%len(colors)])
         lines.append(line)
         legend_txt.append('Max Iterations: {0}'.format(m_itr))

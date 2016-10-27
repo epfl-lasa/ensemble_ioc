@@ -3,21 +3,28 @@ A module that implements the ensemble of inverse optimal control models
 """
 import cPickle as cp
 from collections import defaultdict
+import copy
 
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn import decomposition
-from sklearn.ensemble import RandomTreesEmbedding
-from sklearn import mixture
+from sklearn.ensemble import RandomTreesEmbedding, RandomForestRegressor
+from sklearn.linear_model import LinearRegression
+# <hyin/Oct-23rd replace sklearn GMM as it starts deprecating since 0.18
+# from sklearn import mixture
+import gmr.gmr.gmm as gmm
+from sklearn.cluster import SpectralClustering, KMeans, DBSCAN
 from scipy.misc import logsumexp
 
 EPS = np.finfo(float).eps
 
 class EnsembleIOC(BaseEstimator, RegressorMixin):
-
-    def __init__(self,  n_estimators=20, 
-                        max_depth=5, min_samples_split=10, min_samples_leaf=10,
+    '''
+    Handling state/state pairs as input
+    '''
+    def __init__(self,  n_estimators=20,
+                        max_depth=5, min_samples_split=10, min_samples_leaf=10, clustering=0,
                         random_state=0,
                         em_itrs=5,
                         regularization=0.05,
@@ -28,6 +35,7 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
         '''
         n_estimators        - number of ensembled models
         ...                 - a batch of parameters used for RandomTreesEmbedding, see relevant documents
+        clustering          - whether or not to force the number of subset. If non-zero, call a clustering scheme with the learned metric
         em_itrs             - maximum number of EM iterations to take
         regularization      - small positive scalar to prevent singularity of matrix inversion
         passive_dyn_func    - function to evaluate passive dynamics; None for MaxEnt model
@@ -43,6 +51,7 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
         self.max_depth=max_depth
         self.min_samples_split=min_samples_split
         self.min_samples_leaf=min_samples_leaf
+        self.clustering=clustering
         self.random_state=random_state
         self.em_itrs=em_itrs
         self.reg=regularization
@@ -51,6 +60,78 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
         self.passive_dyn_noise=passive_dyn_noise
         self.verbose=verbose
         return
+
+    def predict(self, X):
+        n_samples, n_dim = X.shape
+
+        # X_transformed = self.random_embedding_mdl_.transform(X)
+        # #predict the next state x_{t+1} given x_{t}
+        # if self.passive_dyn_func is not None and self.passive_dyn_ctrl is not None and self.passive_dyn_noise is not None:
+        #     #passive dynamics available, the
+        #     X_new_passive = np.array([self.passive_dyn_func(X[sample_idx]) for sample_idx in range(n_samples)])
+        #     Sigma_0 = (self.passive_dyn_noise * self.passive_dyn_ctrl + np.eye(n_dim) * self.reg)
+        #     Sigma_0_inv = np.linalg.pinv(Sigma_0)
+        #     def predict_internal(x_trans, x_new_passive):
+        #         indices = np.where(x_trans.toarray()==1)[1]
+        #         # print x_trans.toarray()
+        #         Sigma       = [self.estimators_full_['covars'][i] for i in indices]
+        #         inv_Sigma   = [self.estimators_full_['inv_covars'][i] for i in indices]
+        #         mu          = [self.estimators_full_['means'][i] for i in indices]
+        #         w           = [self.estimators_full_['weights'][i] for i in indices]
+        #         # Sigma       = self.estimators_full_['covars']
+        #         # inv_Sigma   = self.estimators_full_['inv_covars']
+        #         # mu          = self.estimators_full_['means']
+        #         # w           = self.estimators_full_['weights']
+        #         # w           = w / (np.sum(w) + 1e-10)
+        #         covar_1 = [np.linalg.pinv(np.eye(n_dim) + Sigma_0.dot(ic)) for ic in inv_Sigma]
+        #         covar_2 = [np.linalg.pinv(np.eye(n_dim) + Sigma_0_inv.dot(c)) for c in Sigma]
+        #         # a sparse evaluation
+        #         means = [c1.dot(x_new_passive) + c2.dot(m) for wt, m, c1, c2 in zip(w, mu, covar_1, covar_2)]
+        #         # means = [wt*(c1.dot(x_new_passive) + c2.dot(m)) for wt, m, c1, c2 in zip(w, mu, covar_1, covar_2)]
+        #
+        #         #use linreg at the activated leaf
+        #         # linregs = [self.estimators_full_['linreg'][i] for i in indices]
+        #         # means = [linreg.predict([x_new_passive])[0] for linreg in linregs]
+        #         # means = np.sum(means, axis=0)
+        #         means = np.mean(means, axis=0)
+        #         return means
+        #     # X_new_comps = []
+        #     # Sigma_0 = self.passive_dyn_noise * self.passive_dyn_ctrl + np.eye(n_dim) * self.reg
+        #     # Sigma_0_inv = np.linalg.pinv(Sigma_0)
+        #     # means_lst = []
+        #     # for e_idx in range(num_estimators):
+        #     #     Sigma   = self.estimators_[e_idx]['covars']
+        #     #     inv_Sigma   = self.estimators_[e_idx]['inv_covars']
+        #     #     mu          = self.estimators_[e_idx]['means']
+        #     #     w           = self.estimators_[e_idx]['weights']
+        #     #     covar_1 = [np.linalg.pinv(np.eye(n_dim) + Sigma_0.dot(ic)) for ic in inv_Sigma]
+        #     #     covar_2 = [np.linalg.pinv(np.eye(n_dim) + Sigma_0_inv.dot(c)) for c in Sigma]
+        #     #     means = [wt * (c1.dot(X_new_passive.T) + c2.dot(m)).T for wt, m, c1, c2 in zip(w, mu, covar_1, covar_2)]
+        #     #     means_lst.append(np.squeeze(np.sum(means, axis=0)))
+        #
+        #
+        #     # res = np.squeeze(np.mean(means_lst, axis=0))
+        #     res = np.array([predict_internal(x_trans, x_new_passive) for x_trans, x_new_passive in zip(X_transformed, X_new_passive)])
+        # else:
+        #     res = None
+
+        # res = self.random_prediction_mdl_.predict(X)
+        # the above is not correct as we need to marginalize the conditioned state, but this distribution is unavailable
+        # guess if the local gaussian can be used as a surrogate, but for now...
+        # use approximated GMM since it can do GMR for us
+        tmp_gmm = gmm.GMM(  n_components=len(self.gmm_estimators_[0]['weights']),
+                            priors=np.array(self.gmm_estimators_[0]['weights']),
+                            means=np.array(self.gmm_estimators_[0]['means']),
+                            covariances=np.array(self.gmm_estimators_[0]['covars']))
+        res = []
+        for est in self.gmm_estimators_:
+            tmp_gmm.n_components = len(est['weights'])
+            tmp_gmm.priors=np.array(est['weights'])
+            tmp_gmm.means=np.array(est['means'])
+            tmp_gmm.covariances=np.array(est['covars'])
+            res.append(tmp_gmm.predict(indices=range(n_dim), X=X))
+        res = np.mean(res, axis=0)
+        return res
 
     def fit(self, X, y=None):
         '''
@@ -70,6 +151,8 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
         assert(self.min_samples_leaf > 0)
         assert(type(self.em_itrs)==int)
 
+        n_samples, n_dims = X.shape
+
         #an initial partitioning of data with random forest embedding
         self.random_embedding_mdl_ = RandomTreesEmbedding(
             n_estimators=self.n_estimators,
@@ -82,8 +165,10 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
         #we probably do not need the data type to differentiate it is a demonstration
         #of trajectory or commanded state, do we?
         if self.passive_dyn_func is not None and self.passive_dyn_ctrl is not None and self.passive_dyn_noise is not None:
-            self.random_embedding_mdl_.fit(X[:, X.shape[1]/2:])
-            indices = self.random_embedding_mdl_.apply(X[:, X.shape[1]/2:])
+            # self.random_embedding_mdl_.fit(X[:, X.shape[1]/2:])
+            # indices = self.random_embedding_mdl_.apply(X[:, X.shape[1]/2:])
+            self.random_embedding_mdl_.fit(X[:, :X.shape[1]/2])
+            indices = self.random_embedding_mdl_.apply(X[:, :X.shape[1]/2])
             # X_tmp = np.array(X)
             # X_tmp[:, X.shape[1]/2:] = X_tmp[:, X.shape[1]/2:] - X_tmp[:, :X.shape[1]/2]
             # self.random_embedding_mdl_.fit(X_tmp)
@@ -94,21 +179,61 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
             #figure out indices
             indices = self.random_embedding_mdl_.apply(X)
 
-        partitioned_data = defaultdict(list)
+        #prepare ensemble for prediction
+        self.random_prediction_mdl_ = RandomForestRegressor(
+            n_estimators=self.n_estimators,
+            max_depth=self.max_depth,
+            min_samples_split=self.min_samples_split,
+            min_samples_leaf=self.min_samples_leaf,
+            random_state=self.random_state
+            )
 
-        leaf_idx = defaultdict(set)
-        weight_idx = defaultdict(float)
-        #group data belongs to the same partition and have the weights...
-        #is weight really necessary for EM steps? Hmm, seems to be for the initialization
-        #d_idx: data index; p_idx: partition index (comprised of estimator index and leaf index)
-        for d_idx, d, p_idx in zip(range(len(X)), X, indices):
-            for e_idx, l_idx in enumerate(p_idx):
-                partitioned_data[e_idx, l_idx].append(d)
-                leaf_idx[e_idx] |= {l_idx}
+        self.random_prediction_mdl_.fit(X[:, :X.shape[1]/2], X[:, X.shape[1]/2:])
 
-            for e_idx, l_idx in enumerate(p_idx):
-                weight_idx[e_idx, l_idx] = float(len(partitioned_data[e_idx, l_idx])) / len(X)
-                # weight_idx[e_idx, l_idx] = 1. / len(p_idx)
+        if self.clustering > 0:
+            #we need to force the data to situate in clusters with the given number and the random embeddings
+            #first construct affinity
+            #use extracted indices as sparse features to construct an affinity matrix
+            if self.n_estimators > 1:
+                if self.verbose:
+                    print 'Building {0} subset of data depending on their random embedding similarity...'.format(self.clustering)
+                #it makes sense to use the random embedding to do the clustering if we have ensembled features
+                aff_mat = _affinity_matrix_from_indices(indices, 'binary')
+                #using spectral mapping (Laplacian eigenmap)
+                self.cluster = SpectralClustering(n_clusters=self.clustering, affinity='precomputed')
+                self.cluster.fit(aff_mat)
+            else:
+                if self.verbose:
+                    print 'Building {0} subset of data depending on their Euclidean similarity...'.format(self.clustering)
+                #otherwise, use euclidean distance, this should be enough when the state space is low dimensional
+                self.cluster = KMeans(n_clusters=self.clustering, max_iter=200, n_init=5)
+                self.cluster.fit(X)
+
+            partitioned_data = defaultdict(list)
+            leaf_idx = defaultdict(set)
+            weight_idx = defaultdict(float)
+            for d_idx, d, p_idx in zip(range(len(X)), X, self.cluster.labels_):
+                partitioned_data[0, p_idx].append(d)
+                leaf_idx[0] |= {p_idx}
+            for p_idx in range(self.clustering):
+                weight_idx[0, p_idx] = 1./self.clustering
+            num_estimators = 1
+        else:
+            partitioned_data = defaultdict(list)
+            leaf_idx = defaultdict(set)
+            weight_idx = defaultdict(float)
+            #group data belongs to the same partition and have the weights...
+            #is weight really necessary for EM steps? Hmm, seems to be for the initialization
+            #d_idx: data index; p_idx: partition index (comprised of estimator index and leaf index)
+            for d_idx, d, p_idx in zip(range(len(X)), X, indices):
+                for e_idx, l_idx in enumerate(p_idx):
+                    partitioned_data[e_idx, l_idx].append(d)
+                    leaf_idx[e_idx] |= {l_idx}
+
+                for e_idx, l_idx in enumerate(p_idx):
+                    weight_idx[e_idx, l_idx] = float(len(partitioned_data[e_idx, l_idx])) / len(X)
+                    # weight_idx[e_idx, l_idx] = 1. / len(p_idx)
+            num_estimators = self.n_estimators
 
         #for each grouped data, solve an easy IOC problem by assuming quadratic cost-to-go function
         #note that, if the passive dynamics need to be learned, extra steps is needed to train a regressor with weighted data
@@ -118,60 +243,97 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
         self.estimators_full_ = defaultdict(list)
         #<hyin/Feb-6th-2016> an estimator and leaf indexed structure to record the passive likelihood of data...
         passive_likelihood_dict = defaultdict(list)
-        for e_idx in range(self.n_estimators):
+        for e_idx in range(num_estimators):
             #for each estimator
             estimator_parms = defaultdict(list)
             for l_idx in leaf_idx[e_idx]:
                 if self.verbose:
-                    print 'Processing {0}-th estimator and {1}-th leaf...'.format(e_idx, l_idx)
+                    print 'Processing {0}-th estimator and {1}-th leaf/partition...'.format(e_idx, l_idx)
                 #and for each data partition
                 data_partition=np.array(partitioned_data[e_idx, l_idx])
-                if self.passive_dyn_func is not None and self.passive_dyn_ctrl is not None and self.passive_dyn_noise is not None:
-                    X_new         = data_partition[:, data_partition.shape[1]/2:]
-                    X_old         = data_partition[:, 0:data_partition.shape[1]/2]
-                    X_new_passive = np.array([self.passive_dyn_func(X_old[sample_idx]) for sample_idx in range(data_partition.shape[0])])
-                    passive_likelihood = _passive_dyn_likelihood(X_new, X_new_passive, self.passive_dyn_noise, self.passive_dyn_ctrl, self.reg)
+                # if self.passive_dyn_func is not None and self.passive_dyn_ctrl is not None and self.passive_dyn_noise is not None:
+                #     X_new         = data_partition[:, data_partition.shape[1]/2:]
+                #     X_old         = data_partition[:, 0:data_partition.shape[1]/2]
+                #     X_new_passive = np.array([self.passive_dyn_func(X_old[sample_idx]) for sample_idx in range(data_partition.shape[0])])
+                #     passive_likelihood = _passive_dyn_likelihood(X_new, X_new_passive, self.passive_dyn_noise, self.passive_dyn_ctrl, self.reg)
+                #
+                #     weights = passive_likelihood / np.sum(passive_likelihood)
+                #     weighted_mean = np.sum((weights*X_new.T).T, axis=0)
+                #
+                #     weighted_covar = _frequency_weighted_covariance(X_new, weighted_mean, weights, spherical=False)
+                #
+                #     estimator_parms['means'].append(weighted_mean)
+                #     estimator_parms['covars'].append(weighted_covar)
+                #
+                #     #estimate a linear regression at this leaf node, the random forest regressor doesnt support a linear prediction...
+                #     linreg_mdl = LinearRegression()
+                #     linreg_mdl.fit(X_new_passive, X_new)
+                #     estimator_parms['linreg'].append(linreg_mdl)
+                #
+                #     #for full estimators
+                #     self.estimators_full_['means'].append(estimator_parms['means'][-1])
+                #     self.estimators_full_['covars'].append(estimator_parms['covars'][-1])
+                #     self.estimators_full_['linreg'].append(estimator_parms['linreg'][-1])
+                #
+                #     #<hyin/Feb-6th-2016> also remember the data weight according to the passive likelihood
+                #     #this could be useful if the weights according to the passive likelihood is desired for other applications
+                #     #to evaluate some statistics within the data parition
+                #     passive_likelihood_dict[e_idx, l_idx] = weights
+                # else:
+                estimator_parms['means'].append(np.mean(data_partition, axis=0))
+                estimator_parms['covars'].append(np.cov(data_partition.T))
 
-                    weights = passive_likelihood / np.sum(passive_likelihood)
-                    weighted_mean = np.sum((weights*X_new.T).T, axis=0)
-
-                    estimator_parms['means'].append(weighted_mean)
-                    estimator_parms['covars'].append(_frequency_weighted_covariance(X_new, weighted_mean, weights, spherical=False))
-
-                    #for full estimators
-                    self.estimators_full_['means'].append(estimator_parms['means'][-1])
-                    self.estimators_full_['covars'].append(estimator_parms['covars'][-1])
-
-                    #<hyin/Feb-6th-2016> also remember the data weight according to the passive likelihood
-                    #this could be useful if the weights according to the passive likelihood is desired for other applications
-                    #to evaluate some statistics within the data parition
-                    passive_likelihood_dict[e_idx, l_idx] = weights
-                else:
-                    estimator_parms['means'].append(np.mean(data_partition, axis=0))
-                    estimator_parms['covars'].append(np.cov(data_partition.T))
-
-                    #for full estimators
-                    self.estimators_full_['means'].append(estimator_parms['means'][-1])
-                    self.estimators_full_['covars'].append(estimator_parms['covars'][-1])
-
-                    #for MaxEnt, uniform passive likelihood
-                    passive_likelihood_dict[e_idx, l_idx] = np.ones(len(data_partition)) / float(len(data_partition))
+                #for MaxEnt, uniform passive likelihood
+                passive_likelihood_dict[e_idx, l_idx] = np.ones(len(data_partition)) / float(len(data_partition))
 
 
                 estimator_parms['weights'].append(weight_idx[e_idx, l_idx])
-                self.estimators_full_['weights'].append(weight_idx[e_idx, l_idx]/float(self.n_estimators))
 
             self.estimators_.append(estimator_parms)
+
         #can stop here or go for expectation maximization for each estimator...
         if self.em_itrs > 0:
             #prepare em results for each estimator
-            em_res = [self._em_steps(e_idx, X, y) for e_idx in range(self.n_estimators)]
-            #or do EM on the full model?
-            # <hyin/Dec-2nd-2015> no, doing this seems to harm the learning as the aggregated model is really
-            # complex so optimizing that model tends to overfit...
-            # em_res = self._em_steps(None, X, y)
-            #then use them
-            self.estimators_=em_res
+            em_res = [self._em_steps(e_idx, X, y) for e_idx in range(num_estimators)]
+
+            self.estimators_ = em_res
+
+        #record the gmm approximation
+        self.gmm_estimators_ = copy.deepcopy(self.estimators_)
+
+        for est in self.estimators_:
+            for comp_idx in range(len(est['weights'])):
+                est['means'][comp_idx] = est['means'][comp_idx][(n_dims/2):]
+                est['covars'][comp_idx] = est['covars'][comp_idx][(n_dims/2):, (n_dims/2):]
+                self.estimators_full_['weights'].append(est['weights'][comp_idx]/float(num_estimators))
+                #for full estimators
+                self.estimators_full_['means'].append(est['means'][comp_idx])
+                self.estimators_full_['covars'].append(est['covars'][comp_idx])
+
+        if self.passive_dyn_func is not None and self.passive_dyn_ctrl is not None and self.passive_dyn_noise is not None:
+            X_new         = X[:, X.shape[1]/2:]
+            X_old         = X[:, 0:X.shape[1]/2]
+            X_new_passive = np.array([self.passive_dyn_func(X_old[sample_idx]) for sample_idx in range(X.shape[0])])
+            passive_likelihood = _passive_dyn_likelihood(X_new, X_new_passive, self.passive_dyn_noise, self.passive_dyn_ctrl, self.reg)
+            weights = passive_likelihood / np.sum(passive_likelihood)
+
+            tmp_gmm = gmm.GMM(  n_components=len(self.estimators_[0]['weights']),
+                                priors=self.estimators_[0]['weights'],
+                                means=self.estimators_[0]['means'],
+                                covariances=self.estimators_[0]['covars'])
+            for e_idx in range(num_estimators):
+                tmp_gmm.n_components = len(self.estimators_[e_idx]['weights'])
+                tmp_gmm.priors = self.estimators_[e_idx]['weights']
+                tmp_gmm.means = self.estimators_[e_idx]['means']
+                tmp_gmm.covariances = self.estimators_[e_idx]['covars']
+
+                responsibilities = tmp_gmm.to_responsibilities(X_new)
+                new_weights = (weights * responsibilities.T).T
+
+                new_weights = new_weights / (np.sum(new_weights, axis=0) + 1e-10)
+                weighted_means = [np.sum((new_weight*X_new.T).T, axis=0) for new_weight in new_weights.T]
+                self.estimators_[e_idx]['means'] = weighted_means
+
 
         self.prepare_inv_and_constants()
         return indices, leaf_idx, partitioned_data, passive_likelihood_dict
@@ -186,69 +348,73 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
             else:
                 print 'EM steps...'
 
-        if self.passive_dyn_func is not None and self.passive_dyn_ctrl is not None and self.passive_dyn_noise is not None:
-            #extract X_old, X_new, X_new_passive
-            X_old = X[:, 0:X.shape[1]/2]
-            X_new = X[:, X.shape[1]/2:]
-            X_new_passive = np.array([self.passive_dyn_func(X_old[sample_idx]) for sample_idx in range(X.shape[0])])
-
-
-            # EM algorithms
-            current_log_likelihood = None
-            # reset self.converged_ to False
-            converged = False
-            # this line should be removed when 'thresh' is removed in v0.18
-            tol = 1e-4
-            #use the internal EM steps for non-uniform passive dynamics case
-            for i in range(self.em_itrs):
-                prev_log_likelihood = current_log_likelihood
-                # Expectation step
-                log_likelihoods, responsibilities = self._do_estep(
-                    estimator_idx, X_new_passive, X_new, y)
-                current_log_likelihood = log_likelihoods.mean()
-
-                if self.verbose:
-                    print 'current_log_likelihood:', current_log_likelihood
-                if prev_log_likelihood is not None:
-                    change = abs(current_log_likelihood - prev_log_likelihood)
-                    if change < tol:
-                        converged = True
-                        break
-
-                # Maximization step
-                if estimator_idx is not None:
-                    self._do_mstep(X_new_passive, X_new, responsibilities, self.estimators_[estimator_idx])
-                else:
-                    self._do_mstep(X_new_passive, X_new, responsibilities, self.estimators_full_)
-
-            if estimator_idx is None:
-                res=self.estimators_full_
-            else:
-                res=self.estimators_[estimator_idx]
+        if estimator_idx is not None:
+            n_partitions=len(self.estimators_[estimator_idx]['weights'])
+            if self.verbose:
+                print 'num of partitions:', n_partitions
+            #use our own initialization
+            g = gmm.GMM(n_components=n_partitions, priors=np.array(self.estimators_[estimator_idx]['weights']),
+                means=np.array(self.estimators_[estimator_idx]['means']),
+                covariances=np.array(self.estimators_[estimator_idx]['covars']),
+                n_iter=self.em_itrs,
+                covariance_type='full')
         else:
-            if estimator_idx is not None:
-                n_partitions=len(self.estimators_[estimator_idx]['weights'])
-                #use our own initialization
-                g = mixture.GMM(n_components=n_partitions, n_iter=self.em_itrs, init_params='',
-                    covariance_type='full')
-                g.means_=np.array(self.estimators_[estimator_idx]['means'])
-                g.covars_=np.array(self.estimators_[estimator_idx]['covars'])
-                g.weights_=np.array(self.estimators_[estimator_idx]['weights'])
-            else:
-                n_partitions=len(self.estimators_full_['weights'])
-                g = mixture.GMM(n_components=n_partitions, n_iter=self.em_itrs, init_params='',
-                    covariance_type='full')
-                g.means_=np.array(self.estimators_full_['means'])
-                g.covars_=np.array(self.estimators_full_['covars'])
-                g.weights_=np.array(self.estimators_full_['weights'])
+            n_partitions=len(self.estimators_full_['weights'])
+            g = mixture.GaussianMixture(n_components=n_partitions, priors=np.array(self.estimators_[estimator_idx]['weights']),
+                means=np.array(self.estimators_[estimator_idx]['means']),
+                covariances=np.array(self.estimators_[estimator_idx]['covars']),
+                n_iter=self.em_itrs,
+                covariance_type='full')
 
-            g.fit(X)
+        # g.fit(X[:, (X.shape[1]/2):])
+        g.fit(X)
 
-            #prepare to return a defaultdict
-            res=defaultdict(list)
-            res['means']=list(g.means_)
-            res['covars']=list(g.covars_)
-            res['weights']=list(g.weights_)
+        #prepare to return a defaultdict
+        res=defaultdict(list)
+        res['means']=list(g.means)
+        res['covars']=list(g.covariances)
+        res['weights']=list(g.priors)
+
+        # if self.passive_dyn_func is not None and self.passive_dyn_ctrl is not None and self.passive_dyn_noise is not None:
+        #     #extract X_old, X_new, X_new_passive
+        #     X_old = X[:, 0:X.shape[1]/2]
+        #     X_new = X[:, X.shape[1]/2:]
+        #     X_new_passive = np.array([self.passive_dyn_func(X_old[sample_idx]) for sample_idx in range(X.shape[0])])
+        #
+        #
+        #     # EM algorithms
+        #     current_log_likelihood = None
+        #     # reset self.converged_ to False
+        #     converged = False
+        #     # this line should be removed when 'thresh' is removed in v0.18
+        #     tol = 1e-4
+        #     #use the internal EM steps for non-uniform passive dynamics case
+        #     for i in range(self.em_itrs):
+        #         prev_log_likelihood = current_log_likelihood
+        #         # Expectation step
+        #         log_likelihoods, responsibilities = self._do_estep(
+        #             estimator_idx, X_new_passive, X_new, y)
+        #         current_log_likelihood = log_likelihoods.mean()
+        #
+        #         if self.verbose:
+        #             print 'current_log_likelihood:', current_log_likelihood
+        #         if prev_log_likelihood is not None:
+        #             change = abs(current_log_likelihood - prev_log_likelihood)
+        #             if change < tol:
+        #                 converged = True
+        #                 break
+        #
+        #         # Maximization step
+        #         if estimator_idx is not None:
+        #             self._do_mstep(X_new_passive, X_new, responsibilities, self.estimators_[estimator_idx])
+        #         else:
+        #             self._do_mstep(X_new_passive, X_new, responsibilities, self.estimators_full_)
+        #
+        #     if estimator_idx is None:
+        #         res=self.estimators_full_
+        #     else:
+        #         res=self.estimators_[estimator_idx]
+        # else:
 
         return res
 
@@ -259,7 +425,7 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
     def _do_mstep(self, X_new_passive, X_new, responsibilities, parms, min_covar=1e-7):
         """
         X_new_passive    -  An array of the propagation of the old state through the passiv edynamics
-        X_new            -  An array of the new states that observed  
+        X_new            -  An array of the new states that observed
         responsibilities -  array_like, shape (n_samples, n_components)
                             Posterior probabilities of each mixture component for each data
         """
@@ -315,11 +481,11 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
         #<hyin/Nov-20th-2015> As far as I realize, the above close-form solution actually optimize a value lower than the actual objective
         #however, this approximation is not tight thus unfortunately we cannot guarantee the optimum is also obtained for the actual objective...
         #another idea is to symplify the model by only learning the mean, or say the center of the RBF function
-        #the width of the RBF basis can be adapted by solving a one-dimensional numerical optimization, this should lead to 
+        #the width of the RBF basis can be adapted by solving a one-dimensional numerical optimization, this should lead to
         #a generalized EM algorithm
         #<hyin/Jan-22nd-2016> note that without the adaptation of covariance, the shift of mean
         #is not that great option, so let's only keeps the weights adapatation. We need numerical optimization for the covariance adaptation
-        #to see if it would help the mean shift 
+        #to see if it would help the mean shift
         if 'means' in parms:
             for c, old_mean in enumerate(parms['means']):
                 Sigma_k_array = parms['covars'][c]
@@ -343,7 +509,7 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
                 inv_Sigma_sum = inv_Sigma_k_array + inv_Sigma_0
                 delta_X_new_X_new_passive = (inv_Sigma_sum.dot(X_new.T) - inv_Sigma_0.dot(X_new_passive.T)).T
                 parms['means'][c] = coeff_mat.dot(np.sum(delta_X_new_X_new_passive*responsibilities[:, c][:, np.newaxis]*inverse_weights[c, 0], axis=0))
-        # return
+        return
 
     def sample(self, n_samples=1, random_state=None):
         '''
@@ -359,11 +525,15 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
     def score(self, X, y=None):
         #take log likelihood for each estimator for a given trajectory/state
         #without considering the passive dynamics: MaxEnt model
+        if self.clustering > 0:
+            num_estimators = 1
+        else:
+            num_estimators = self.n_estimators
         estimator_scores=[_log_multivariate_normal_density_full(
                             X,
                             np.array(self.estimators_[e_idx]['means']),
                             np.array(self.estimators_[e_idx]['covars']))
-                            +np.log(self.estimators_[e_idx]['weights']) for e_idx in range(self.n_estimators)]
+                            +np.log(self.estimators_[e_idx]['weights']) for e_idx in range(num_estimators)]
 
         # concatenate different models...
         # estimator_scores=np.concatenate(estimator_scores,axis=1)
@@ -373,22 +543,26 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
         mdl_eval = lambda scores: [logsumexp(x_score) for x_score in scores]
         estimator_scores = np.array([mdl_eval(scores) for scores in estimator_scores])
 
-        responsibilities = [np.exp(estimator_scores[e_idx] - estimator_scores[e_idx][:, np.newaxis]) for e_idx in range(self.n_estimators)]
+        responsibilities = [np.exp(estimator_scores[e_idx] - estimator_scores[e_idx][:, np.newaxis]) for e_idx in range(num_estimators)]
         #average seems to be more reasonable...
         res=np.mean(estimator_scores,axis=0)
         res_responsibilities = np.mean(np.array(responsibilities), axis=0)
         return -np.array(res), res_responsibilities
 
     def score_samples(self, X, y=None, min_covar=1.e-7):
+        if self.clustering > 0:
+            num_estimators = 1
+        else:
+            num_estimators = self.n_estimators
         #a different version to evaluate the quality/likelihood of state pairs
         if self.passive_dyn_func is not None and self.passive_dyn_ctrl is not None and self.passive_dyn_noise is not None:
             X_old = X[:, 0:X.shape[1]/2]
             X_new = X[:, X.shape[1]/2:]
             X_new_passive = np.array([self.passive_dyn_func(X_old[sample_idx]) for sample_idx in range(X.shape[0])])
 
-            log_prob_lst = [None] * self.n_estimators
-            respon_lst = [None] * self.n_estimators
-            for e_idx in range(self.n_estimators):
+            log_prob_lst = [None] * num_estimators
+            respon_lst = [None] * num_estimators
+            for e_idx in range(num_estimators):
                 log_prob_lst[e_idx], respon_lst[e_idx] = self._score_sample_for_passive_mdl_helper(
                     e_idx, X_new_passive, X_new, y, min_covar)
             res = -np.mean(np.array(log_prob_lst),axis=0)
@@ -396,12 +570,12 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
         else:
             #this should be a trajectory/maximum ent model, use score...
             res, res_responsibilities = self.score(X, y)
-        return res, res_responsibilities 
+        return res, res_responsibilities
 
 
-    def value_eval_samples(self, X, y=None, average=False, full=True, const=True):
+    def value_eval_samples(self, X, y=None, average=True, full=True, const=True):
         #switching off the constant term seems to smooth the value function
-        #I don't quite understand why, my current guess is that the axis-align partition results in 
+        #I don't quite understand why, my current guess is that the axis-align partition results in
         #oversized covariance matrices, making the constant terms extremely large for some partitions
         #this can be shown adding a fixed term to the covariance matrices to mitigate the singularity
         #this could be cast as a kind of regularization
@@ -410,16 +584,21 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
         #lets keep this ugly solution...
         n_samples, n_dim = X.shape
 
+        if self.clustering > 0:
+            num_estimators = 1
+        else:
+            num_estimators = self.n_estimators
+
         if not average:
             if not full:
                 weights = []
-                for idx in range(self.n_estimators):
-                    weights = weights + (np.array(self.estimators_[idx]['weights'])/self.n_estimators).tolist()
+                for idx in range(num_estimators):
+                    weights = weights + (np.array(self.estimators_[idx]['weights'])/num_estimators).tolist()
                 #the real function to evaluate the value functions, which are actually un-normalized Gaussians
                 def value_estimator_eval(d):
                     res = []
-                    for idx in range(self.n_estimators):
-                        for i, (m, c_inv) in enumerate(   zip(self.estimators_[idx]['means'], 
+                    for idx in range(num_estimators):
+                        for i, (m, c_inv) in enumerate(   zip(self.estimators_[idx]['means'],
                                                     self.estimators_[idx]['inv_covars'])):
                             diff_data = d - m
                             res.append(.5*diff_data.dot(c_inv).dot(diff_data) + self.estimators_[idx]['beta'][i]*const)
@@ -429,18 +608,18 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
             else:
                 res = np.zeros(X.shape[0])
                 res_mat = np.zeros((X.shape[0], len(self.estimators_full_['means'])))
-                for i, (m, c_inv)   in enumerate(   zip(self.estimators_full_['means'], 
+                for i, (m, c_inv)   in enumerate(   zip(self.estimators_full_['means'],
                                                 self.estimators_full_['inv_covars'])):
                     diff_data = X - m
                     res_mat[:, i] = np.array([e_prod.dot(e)*0.5 + self.estimators_full_['beta'][i]*const for e_prod, e in zip(diff_data.dot(c_inv), diff_data)])
                 for d_idx, r in enumerate(res_mat):
-                    res[d_idx] = -logsumexp(-r, b=self.estimators_full_['weights'])
+                    res[d_idx] = -logsumexp(-r, b=np.array(self.estimators_full_['weights']))
         else:
             #the real function to evaluate the value functions, which are actually un-normalized Gaussians
             def value_estimator_eval(idx):
                 res = np.zeros((X.shape[0], len(self.estimators_[idx]['means'])))
                 logsumexp_res=np.zeros(len(res))
-                for i, (m, c_inv) in enumerate(   zip(self.estimators_[idx]['means'], 
+                for i, (m, c_inv) in enumerate(   zip(self.estimators_[idx]['means'],
                                             self.estimators_[idx]['inv_covars'])):
                     diff_data = X - m
                     res[:, i] = np.array([e_prod.dot(e)*0.5 + self.estimators_[idx]['beta'][i]*const for e_prod, e in zip(diff_data.dot(c_inv), diff_data)])
@@ -448,12 +627,12 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
                     logsumexp_res[d_idx] = -logsumexp(-r, b=self.estimators_[idx]['weights'])
 
                 return logsumexp_res
-                
-            estimator_scores = [ value_estimator_eval(e_idx) for e_idx in range(self.n_estimators) ]
+
+            estimator_scores = [ value_estimator_eval(e_idx) for e_idx in range(num_estimators) ]
             #take average
             res = np.mean(np.array(estimator_scores), axis=0)
         return res
- 
+
     def _score_sample_for_passive_mdl_helper(self, estimator_idx, X_new_passive, X_new, y, min_covar=1.e-7):
         #for the specified estimator with a passive dynamics model,
         #evaluate the likelihood for given state pairs
@@ -505,7 +684,7 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
                                           lower=True)
             m = S.dot((Sigma_k_inv.dot(mu_k)+Sigma_0_inv.dot(X_new_passive.T).T).T).T
             #fraction part of above equation
-            # scale_log_det = -.5 * (np.log(2*np.pi) + np.sum(np.log(S_inv)) + 
+            # scale_log_det = -.5 * (np.log(2*np.pi) + np.sum(np.log(S_inv)) +
             #     2*np.sum(np.log(np.diag(Sigma_k_chol))) + np.sum(np.log(np.diag(Sigma_0))))
             # #exp() part of the above equation
             # S_sol = linalg.solve_triangular(M_chol, (X_new - X_old).T, lower=True).T
@@ -526,24 +705,31 @@ class EnsembleIOC(BaseEstimator, RegressorMixin):
     def prepare_inv_and_constants(self):
         '''
         supplement steps to prepare inverse of variance matrices and constant terms
-        ''' 
+        '''
         regularization = self.reg
-        for idx in range(self.n_estimators):
+
+        if self.clustering > 0:
+            num_estimators = 1
+        else:
+            num_estimators = self.n_estimators
+
+        for idx in range(num_estimators):
             self.estimators_[idx]['inv_covars'] = [ np.linalg.pinv(covar + np.eye(covar.shape[0])*regularization) for covar in self.estimators_[idx]['covars']]
             self.estimators_[idx]['beta'] = [.5*np.log(pseudo_determinant(covar + np.eye(covar.shape[0])*regularization)) + .5*np.log(2*np.pi)*covar.shape[0] for covar in self.estimators_[idx]['covars']]
 
         self.estimators_full_['weights'] = []
         self.estimators_full_['means'] = []
         self.estimators_full_['covars'] = []
-        for e_idx in range(self.n_estimators):
+        for e_idx in range(num_estimators):
             for leaf_idx in range(len(self.estimators_[e_idx]['weights'])):
-                self.estimators_full_['weights'].append(self.estimators_[e_idx]['weights'][leaf_idx]/float(self.n_estimators))
+                self.estimators_full_['weights'].append(self.estimators_[e_idx]['weights'][leaf_idx]/float(num_estimators))
                 self.estimators_full_['covars'].append(self.estimators_[e_idx]['covars'][leaf_idx])
                 self.estimators_full_['means'].append(self.estimators_[e_idx]['means'][leaf_idx])
         # self.estimators_full_['inv_covars'] = [ np.linalg.pinv(covar) for covar in self.estimators_full_['covars']]
         # self.estimators_full_['beta'] = [.5*np.log(pseudo_determinant(covar)) + .5*np.log(2*np.pi)*covar.shape[0] for covar in self.estimators_full_['covars']]
                 self.estimators_full_['inv_covars'].append(self.estimators_[e_idx]['inv_covars'][leaf_idx])
                 self.estimators_full_['beta'].append(self.estimators_[e_idx]['beta'][leaf_idx])
+
         return
 
 from scipy import linalg
@@ -586,13 +772,13 @@ def _log_multivariate_normal_density_full(X, means, covars, min_covar=1.e-7):
 
 def _passive_dyn_likelihood(X_new, X_new_passive, passive_dyn_noise, passive_dyn_ctrl, reg=1e-5):
     #regularized sigma
-    sigma = passive_dyn_noise*passive_dyn_ctrl + reg*np.eye(X_new.shape[1])   
+    sigma = passive_dyn_noise*passive_dyn_ctrl + reg*np.eye(X_new.shape[1])
     #<hyin/Feb-9th-2016> slightly modify the sequence to prevent potential overflow issue
     denom = ((2*np.pi)**(X_new.shape[1]/2.0))*np.linalg.det(sigma)**.5
     err = X_new - X_new_passive
     err_prod = err.dot(np.linalg.pinv(sigma))
     quad_term = np.array([e.dot(ep) for e, ep in zip(err, err_prod)])
-    
+
     num = np.exp(-.5*quad_term)
     return num/denom
 
@@ -620,6 +806,186 @@ def _stratified_weighted_covariance(X, m, weights):
             covar[j, k] = np.sum([c*(d[j]-m[j])*(d[k]-m[k]) for c, d in zip(coeff, X)])
     return covar
 
+def _affinity_matrix_from_indices(indices, metric='binary', param=1.0):
+    #input is an array of data represented by sparse encoding
+    if metric == 'binary':
+        #binary metric is parm free
+        aff_op = lambda a, b: np.mean([int(ind_a==ind_b) for ind_a, ind_b in zip(a, b)])
+    elif metric == 'gaussian':
+        aff_op = lambda a, b: np.mean([np.exp(-(a-b).dot(a-b)*param) if ind_a==ind_b else 0 for ind_a, ind_b in zip(a, b)])
+    elif metric == 'mahalanobis':
+        aff_op = lambda a, b: np.mean([np.exp(-param.dot(a-b).dot(a-b)) if ind_a==ind_b else 0 for ind_a, ind_b in zip(a, b)])
+    else:
+        aff_op = None
+
+    if aff_op is not None:
+        n_samples = indices.shape[0]
+        aff_mat = [[aff_op(indices[i], indices[j]) for j in range(n_samples)] for i in range(n_samples)]
+    else:
+        print 'Invalid metric specified.'
+        aff_mat = None
+    return aff_mat
+
+class EnsembleIOCTraj(BaseEstimator, RegressorMixin):
+    '''
+    Handling the entire trajectories as the input
+    '''
+    def __init__(self,  traj_clusters=3, ti=True,
+                        n_estimators=20,
+                        max_depth=5, min_samples_split=10, min_samples_leaf=10, state_n_estimators=100, state_n_clusters=0,
+                        random_state=0,
+                        em_itrs=5,
+                        regularization=0.05,
+                        passive_dyn_func=None,
+                        passive_dyn_ctrl=None,
+                        passive_dyn_noise=None,
+                        verbose=False):
+        '''
+        traj_clusters       - number of clusters of trajectories
+        ti                  - whether or not to extract time invariant states
+
+        ***The remained parameters are for the state ioc estimators***
+        n_estimators        - number of ensembled models
+        ...                 - a batch of parameters used for RandomTreesEmbedding, see relevant documents
+
+        state_n_estimators  - number of state estimators
+        state_n_clusters    - number of clusters for states for each trajectory group
+        em_itrs             - maximum number of EM iterations to take
+        regularization      - small positive scalar to prevent singularity of matrix inversion
+        passive_dyn_func    - function to evaluate passive dynamics; None for MaxEnt model
+        passive_dyn_ctrl    - function to return the control matrix which might depend on the state...
+        passive_dyn_noise   - covariance of a Gaussian noise; only applicable when passive_dyn is Gaussian; None for MaxEnt model
+                                note this implies a dynamical system with constant input gain. It is extendable to have state dependent
+                                input gain then we need covariance for each data point
+        verbose             - output training information
+        '''
+        self.n_traj_clusters = traj_clusters
+        if isinstance(state_n_clusters, int):
+            state_clusters_lst = [state_n_clusters] * self.n_traj_clusters
+        else:
+            state_clusters_lst = state_n_clusters
+
+        self.eioc_mdls = [ EnsembleIOC( n_estimators=state_n_estimators,
+                                        max_depth=max_depth, min_samples_split=min_samples_split, min_samples_leaf=min_samples_leaf, clustering=state_n_clusters,  #let random embedding decides how many clusters we should have
+                                        random_state=random_state,
+                                        em_itrs=em_itrs,
+                                        regularization=regularization,
+                                        passive_dyn_func=passive_dyn_func,
+                                        passive_dyn_ctrl=passive_dyn_ctrl,
+                                        passive_dyn_noise=passive_dyn_noise,
+                                        verbose=verbose) for i in range(self.n_traj_clusters) ]
+        self.ti = ti
+        self.n_estimators=n_estimators
+        self.max_depth=max_depth
+        self.min_samples_split=min_samples_split
+        self.min_samples_leaf=min_samples_leaf
+        self.random_state=random_state
+        self.state_n_estimators = state_n_estimators
+        self.state_n_clusters = state_n_clusters
+        self.em_itrs=em_itrs
+        self.reg=regularization
+        self.passive_dyn_func=passive_dyn_func
+        self.passive_dyn_ctrl=passive_dyn_ctrl
+        self.passive_dyn_noise=passive_dyn_noise
+        self.verbose=verbose
+
+        self.clustered_trajs = None
+        return
+
+    def cluster_trajectories(self, trajs):
+        #clustering the trajectories according to random embedding parameters and number of clusters
+        #flatten each trajectories
+        flattened_trajs = np.array([np.array(traj).T.flatten() for traj in trajs])
+
+        #an initial partitioning of data with random forest embedding
+        self.random_embedding_mdl_ = RandomTreesEmbedding(
+            n_estimators=self.n_estimators,
+            max_depth=self.max_depth,
+            min_samples_split=self.min_samples_split,
+            min_samples_leaf=self.min_samples_leaf,
+            random_state=self.random_state
+            )
+
+        self.random_embedding_mdl_.fit(flattened_trajs)
+        #figure out indices
+        indices = self.random_embedding_mdl_.apply(flattened_trajs)
+
+        #we need to force the data to situate in clusters with the given number and the random embeddings
+        #first construct affinity
+        #use extracted indices as sparse features to construct an affinity matrix
+        if self.verbose:
+            print 'Building {0} subset of trajectories depending on their random embedding similarity...'.format(self.n_traj_clusters)
+        aff_mat = _affinity_matrix_from_indices(indices, 'binary')
+        #using spectral mapping (Laplacian eigenmap)
+        self.cluster = SpectralClustering(n_clusters=self.n_traj_clusters, affinity='precomputed')
+        self.cluster.fit(aff_mat)
+
+        clustered_trajs = [[] for i in range(self.n_traj_clusters)]
+
+        for d_idx, d, p_idx in zip(range(len(trajs)), trajs, self.cluster.labels_):
+            clustered_trajs[p_idx].append(d)
+
+        #let's see how the DBSCAN works
+        #here it means at least how many trajectories do we need to form a cluster
+        #dont know why always assign all of the data as noise...
+        # self.cluster = DBSCAN(eps=0.5, min_samples=self.n_traj_clusters, metric='euclidean', algorithm='auto')
+        # flatten_trajs = [traj.T.flatten() for traj in trajs]
+        # self.cluster.fit(flatten_trajs)
+        # labels = self.cluster.labels_
+        # print labels
+        # # Number of clusters in labels, ignoring noise if present.
+        # n_clusters_ = len(set(labels)) - (1 if -1 in labels else 0)
+        #
+        # clustered_trajs = [[] for i in range(n_clusters_)]
+        #
+        # for d_idx, d, p_idx in zip(range(len(trajs)), trajs, labels):
+        #     clustered_trajs[p_idx].append(d)
+
+        return np.array(clustered_trajs)
+
+    def fit(self, X, y=None):
+        '''
+        X is an array of trajectories
+        '''
+        #first cluster these trajectories to locally similar data sets (here 'locally' does not necessarily mean euclidean distance)
+        clustered_trajs = self.cluster_trajectories(X)
+
+        for i in range(len(clustered_trajs)):
+            #for each clustered trajectories train the sub eioc model
+            #reform the trajectories if necessary
+            if not self.ti:
+                #time varing system, just flatten them
+                flattened_trajs = [ np.array(traj).T.flatten() in clustered_trajs[i]]
+                self.eioc_mdls[i].clustering=1
+                self.eioc_mdls[i].fit(flattened_trajs)
+                #note the fit model retains mean and covariance of the flattened trajectories
+            else:
+                #time invariant
+                aug_states = []
+                for traj in clustered_trajs[i]:
+                    for t_idx in range(len(traj)-1):
+                        aug_states.append(np.array(traj)[t_idx:t_idx+2, :].flatten())
+
+                self.eioc_mdls[i].fit(np.array(aug_states))
+
+        self.clustered_trajs = clustered_trajs
+        return
+
+    def score(self, X, gamma=1.0, average=False):
+        #score a query state
+        if self.clustered_trajs is not None:
+            #the model ensemble has been trained
+            # score_ensemble = [np.array(model.score(X)[0]) for model in self.eioc_mdls]
+            score_ensemble = [np.array(model.value_eval_samples(X,average=average)) for model in self.eioc_mdls]
+            #average (maximum likelihood) or logsumexp (softmaximum -> maximum posterior)
+            if gamma is None:
+                res = np.mean(score_ensemble, axis=0)
+            else:
+                # mdl_eval = lambda scores: [logsumexp(x_score) for x_score in scores]
+                res = np.array([-logsumexp(-gamma*np.array([score[sample_idx] for score in score_ensemble])) for sample_idx, sample in enumerate(X)])
+
+        return res
+
 def EnsembleIOCTest():
     ''''
     A test to try modeling the occurences of state visiting
@@ -639,12 +1005,13 @@ def EnsembleIOCTest():
 
     # concatenate the two datasets into the final training set
     X_train = np.vstack([shifted_gaussian, stretched_gaussian])
+    np.random.shuffle(X_train)
 
-    model=EnsembleIOC(n_estimators=20, max_depth=3, min_samples_split=10, min_samples_leaf=10,
+    model=EnsembleIOC(n_estimators=1, max_depth=3, min_samples_split=10, min_samples_leaf=10, clustering=2,
                         random_state=10,
-                        em_itrs=15)
+                        em_itrs=0)
     #learn
-    model.fit(X_train)
+    indices, leaf_idx, partitioned_data, passive_likelihood_dict = model.fit(X_train)
     # print len(model.estimators_)
     # print model.estimators_[0]['means']
     # print model.estimators_[0]['covars']
@@ -665,11 +1032,20 @@ def EnsembleIOCTest():
     grid_dim2=np.linspace(ymin, ymax)
     Sgrid=np.meshgrid(grid_dim1, grid_dim2)
     states = np.array([np.reshape(dim, (1, -1))[0] for dim in Sgrid])
+
     costs, _=model.score(states.T)
-    pcol = ax.pcolormesh(grid_dim1, grid_dim2, 
+    pcol = ax.pcolormesh(grid_dim1, grid_dim2,
         np.reshape(costs, (len(grid_dim1), len(grid_dim2))),
         shading='none')
     pcol.set_edgecolor('face')
+
+    colors = ['b','w']
+    for idx, c in enumerate(colors):
+        pnts = np.array(partitioned_data[0, idx])
+        ax.plot(pnts[:, 0], pnts[:, 1], '*', color=c)
+        mean = model.estimators_[0]['means'][idx]
+        ax.plot([mean[0]], [mean[1]], 'o', markersize=24, color=c)
+        print mean, model.estimators_[0]['covars'][idx]
     plt.show()
 
     return

@@ -1,7 +1,7 @@
 """
 A simple module for solving model-based MDP problem
 Discrete state/action space, known transition matrix...
-A simplified python version similar to the one in Drake toolkit 
+A simplified python version similar to the one in Drake toolkit
 (https://github.com/RobotLocomotion/drake)
 """
 
@@ -17,8 +17,8 @@ class DynamicalSystem:
     A class to define a dynamical system: might be discrete time or continous time...
     """
     def __init__(self, is_ct=True):
-        self.is_ct_ = is_ct 
-        # self.sysfunc_ = sysfunc         #a system function accepts state and control and 
+        self.is_ct_ = is_ct
+        # self.sysfunc_ = sysfunc         #a system function accepts state and control and
         #                                 #return derivative/next state, possibly with higher order stuff
         return
     def Dynamics(self, x, u, t=None, parms=None):
@@ -131,7 +131,10 @@ class MarkovDecisionProcess:
                 if is_ct:
                     # the system must be an update equation
                     x_new = sys.Dynamics(self.S_[:, state_idx], self.A_[:, action_idx])
-                    self.C_[state_idx, action_idx] = sys.dt_ * costfunc(self.S_[:, state_idx], self.A_[:, action_idx], sys)
+                    if np.isinf(costfunc(self.S_[:, state_idx], self.A_[:, action_idx], sys)) or np.isnan(costfunc(self.S_[:, state_idx], self.A_[:, action_idx], sys)):
+                        print self.S_[:, state_idx], self.A_[:, action_idx]
+                    else:
+                        self.C_[state_idx, action_idx] = sys.dt_ * costfunc(self.S_[:, state_idx], self.A_[:, action_idx], sys)
 
                     if isinstance(x_new, list):
                         #contains both expected state and diagonal Gaussian noise...
@@ -142,7 +145,7 @@ class MarkovDecisionProcess:
                             print 'Inconsistent length of state and noise vector...'
                             return
                         #wrap x_new if needed, this is useful for state variable like angular position
-                        x_new_mu[wrap_idx] = np.mod(x_new_mu[wrap_idx] - xmin[wrap_idx], 
+                        x_new_mu[wrap_idx] = np.mod(x_new_mu[wrap_idx] - xmin[wrap_idx],
                             xmax[wrap_idx] - xmin[wrap_idx]) + xmin[wrap_idx]
                         x_new_mu_idx = xdigitize(x_new_mu)
                         x_new_mu_digitized_state = self.S_[:, sub2ind(x_new_mu_idx)]
@@ -160,14 +163,14 @@ class MarkovDecisionProcess:
                             x_new_mu_tmp_max[dim_idx] +=  2*x_new_sig[dim_idx]
                             min_idx = xdigitize_dim(x_new_mu_tmp_min, dim_idx)
                             max_idx = xdigitize_dim(x_new_mu_tmp_max, dim_idx)
-                            
+
                             for step_idx in range(min_idx, max_idx+1):
                                 tmp_x_new_mu_idx[dim_idx] = step_idx
                                 #get the index of involved state
                                 involved_state_idx = sub2ind(tmp_x_new_mu_idx)
                                 involved_states.append(involved_state_idx)
                                 coeff_lst.append(np.exp(-np.linalg.norm(((self.S_[:, involved_state_idx] - x_new_mu_digitized_state)/x_new_sig))**2))
-                        
+
                         coeff_lst = coeff_lst / np.sum(coeff_lst)
                         #assign transition probability for each state
                         for coeff, involved_state_idx in zip(coeff_lst.tolist(), involved_states):
@@ -176,7 +179,7 @@ class MarkovDecisionProcess:
                         #only updated state is available, need to map it to the grid
                         #add Baryinterpolation?
                         #wrap x_new if needed, this is useful for state variable like angular position
-                        x_new[wrap_idx] = np.mod(x_new[wrap_idx] - xmin[wrap_idx], 
+                        x_new[wrap_idx] = np.mod(x_new[wrap_idx] - xmin[wrap_idx],
                             xmax[wrap_idx] - xmin[wrap_idx]) + xmin[wrap_idx]
 
                         #barycentricinterpolation...
@@ -196,6 +199,11 @@ class MarkovDecisionProcess:
                         x_new_idx = xdigitize(x_new[0])
                         state_new_idx = sub2ind(x_new_idx)
                         self.T_[action_idx][state_idx, state_new_idx] = x_new[1]
+        #check the T matrix
+        # for action_idx in range(self.num_action_):
+        #     if np.isinf(self.T_[action_idx]).any():
+        #         print action_idx
+        #         print np.isinf(self.T_[action_idx])
         return
 
     def ValueIteration(self, converged=.01, drawFunc=None, detail=False):
@@ -216,8 +224,11 @@ class MarkovDecisionProcess:
             Jold = np.array(J)
             #<hyin/Apr-14th-2015> note the reshape sequence of dot result
             J = np.amin(self.C_ + self.gamma_*np.reshape(Tstack.dot(J), (self.num_action_, self.num_state_)).transpose(), axis=1)
+            # print 'iterating...'
+            # if np.isinf(J).any() or np.isinf(Tstack).any():
+            #     print np.isinf(J), np.isinf(Tstack)
             err = np.amax(np.abs(Jold-J))
-            
+
             if detail:
                 #record current itr, J, Q, err
                 tmp_rec = dict()
@@ -225,7 +236,7 @@ class MarkovDecisionProcess:
 
                 tmp_rec['value_func'] = J
                 tmp_rec['action_value_func'] = curr_Q
-                tmp_rec['error'] = err 
+                tmp_rec['error'] = err
                 hist.append(tmp_rec)
 
             print 'Iteration:', n_itrs, 'Error:', err
@@ -265,7 +276,7 @@ class MarkovDecisionProcess:
             action_idx = np.random.choice(best)
         else:
             action_idx = q.index(Q_min)
-        
+
         return action_idx
 
     def QLearningSarsa(self, sys, epsilon=0.2, alpha=0.05, max_itrs=5000, drawFunc=None, detail=False):
@@ -327,11 +338,11 @@ class MarkovDecisionProcess:
                 action_new_idx = self.ChooseOptimalActionFromQFunc(Q, state_new_idx)
                 # print 'Choose current optimal action!', action_new_idx
                 n_choose_optimal_action += 1
-            
+
             #update curr Q value for current state index and action index
             if Q[action_idx][state_idx] == np.inf:
                 Q[action_idx][state_idx] = c
-            else: 
+            else:
                 Q[action_idx][state_idx] += alpha*(c + self.gamma_*Q[action_new_idx][state_new_idx] - Q[action_idx][state_idx])
 
             #check if new state is a terminal one...
@@ -343,7 +354,7 @@ class MarkovDecisionProcess:
                 # raw_input()
                 #zero costs for x_new as it is the goal state
                 for action_idx in range(self.num_action_):
-                    Q[action_idx][state_new_idx] = 0.0 
+                    Q[action_idx][state_new_idx] = 0.0
                 #a new random state
                 x = sys.RandomSelectFeasibleState()
                 x_idx = xdigitize(x)
@@ -406,7 +417,7 @@ class MarkovDecisionProcess:
         x = sys.RandomSelectFeasibleState()
         x_idx = xdigitize(x)
         state_idx = sub2ind(x_idx)
-        
+
         while n_itrs < max_itrs:
             #generate an action according to the epsilon greedy policy
             #throw a dice
@@ -434,15 +445,15 @@ class MarkovDecisionProcess:
             #update curr Q value for current state index and action index
             if Q[action_idx][state_idx] == np.inf:
                 Q[action_idx][state_idx] = c
-            else: 
-                Q[action_idx][state_idx] += alpha*(c + self.gamma_*min([Q[i][state_new_idx] 
+            else:
+                Q[action_idx][state_idx] += alpha*(c + self.gamma_*min([Q[i][state_new_idx]
                     for i in range(self.num_action_)]) - Q[action_idx][state_idx])
 
             #check if new state is a terminal one...
             if sys.IsGoalState(x_new):
                 #zero costs for x_new as it is the goal state
                 for action_idx in range(self.num_action_):
-                    Q[action_idx][state_new_idx] = 0.0 
+                    Q[action_idx][state_new_idx] = 0.0
                 #a new random state
                 x = sys.RandomSelectFeasibleState()
                 x_idx = xdigitize(x)
