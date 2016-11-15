@@ -12,7 +12,7 @@ matplotlib      (>= 1.5.1)
 [gmr repository](https://github.com/navigator8972/gmr.git)
 
 
-## An interted pendulum example - target and learned cost-to-go
+## An inverted pendulum example - target and learned cost-to-go
 
 ![](./fig/target_cost_to_go.png)
 ![](./fig/learned_cost_to_go.png)
