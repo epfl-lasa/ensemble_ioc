@@ -186,7 +186,7 @@ class MarkovDecisionProcess:
                         indices, coeffs = utils.BarycentricInterpolation(self.xbins_, np.array([x_new]))
 
                         for i in range(len(indices[0])):
-                            self.T_[action_idx][state_idx, indices[0, i]] = coeffs[0, i]
+                            self.T_[action_idx][state_idx, int(indices[0, i])] = coeffs[0, i]
                 else:
                     #discrete state dynamical system...
                     #for discrete state dynamics, take the direct returned states and associated probability
