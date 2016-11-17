@@ -13,6 +13,14 @@ matplotlib      (>= 1.5.1)
 
 
 ## An inverted pendulum example - target and learned cost-to-go
+Run the test
+```
+import PyMDP_Pendulum as mdp_pendulum
+import cPickle as cp
 
+#load data
+demo_trajs = cp.load(open('bin/training_data.pkl', 'rb'))
+mdp_pendulum.PendulumMDPValueLearningTest(demo_trajs)
+```
 ![](./fig/target_cost_to_go.png)
 ![](./fig/learned_cost_to_go.png)
